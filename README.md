@@ -15,6 +15,10 @@ implements the system.
 
 ## Team workflow
 
+**Current protection status:** a `main` protection rule is saved, but GitHub
+reports that it is **not enforced** on this private repository under the current
+plan. Follow the PR workflow below; direct pushes are not currently blocked.
+
 - `main`: shared integration branch. Submit changes through a Pull Request (PR).
 - `kingsley`: Kingsley's personal working branch.
 - Teammates: create a branch using your own name after accepting a collaborator

@@ -71,17 +71,22 @@ merged code working. Only update a local `main` with `git pull --ff-only`.
 
 ## Main branch protection
 
-The intended protection for `main` is:
+The saved protection configuration for `main` is:
 
 - Require a PR and one approving review; dismiss stale approvals after new commits.
 - Require review conversations to be resolved before merging.
 - Apply the rules to administrators too (no bypass).
 - Block force pushes and branch deletion.
 
-Private personal repositories require GitHub Pro for enforced branch protection.
-The owner must verify that the rule is active in **Settings > Branches**.
-On GitHub Free these remain team conventions until the account is upgraded;
-an eligible student can activate Pro through GitHub Education.
+**Verified during setup:** GitHub reports that this rule is **not enforced**
+on this private repository under the current plan. Direct pushes to `main`
+are therefore not blocked. These rules currently remain team conventions.
+
+[GitHub's documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)
+lists GitHub Pro as supporting protection for private personal repositories.
+Eligible students can obtain Pro through GitHub Education. After activating a
+supported plan, verify enforcement in **Settings > Branches** before relying
+on the rule.
 
 The PR author cannot supply their own required approval. Invite at least one
 teammate before relying on a mandatory one-review rule. Add required status
