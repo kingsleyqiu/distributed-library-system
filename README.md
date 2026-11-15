@@ -25,8 +25,8 @@ plan. Follow the PR workflow below; direct pushes are not currently blocked.
   invitation. All branches share the same project files; separate code copies
   or folders per person are unnecessary.
 
-Push commits to your own branch, open a PR into `main`, ask another teammate to
-review, and test before merging. Synchronize your branch with `origin/main`
+Push commits to your own branch, open a PR into `main`, ask another teammate to 
+test before merging. Synchronize your branch with `origin/main`
 before starting more work. Use **Create a merge commit** for these ongoing
 personal branches, and keep the branches after merging.
 
