@@ -1,0 +1,3 @@
+{"book_id":"book-018","title":"The Workshop of Gentle Rain","author":"Noel Fern","branch_id":"branch-3","copies":2}
+
+The workshop repaired umbrellas that had forgotten the sound of rain. Its owner tested each one beneath a wooden watering can.

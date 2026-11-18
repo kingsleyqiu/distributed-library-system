@@ -1,0 +1,3 @@
+{"book_id":"book-005","title":"The Glass Seed","author":"Nora Wren","branch_id":"branch-2","copies":2}
+
+The glass seed never grew a stem. Instead, it reflected a different garden whenever its owner held it toward the sun.

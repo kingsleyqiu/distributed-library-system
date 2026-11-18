@@ -1,0 +1,3 @@
+{"book_id":"book-011","title":"The Amber Staircase","author":"Cora Ash","branch_id":"branch-2","copies":2}
+
+The amber staircase caught the afternoon sun and lit a forgotten doorway. Beyond it, a painter found a room full of unfinished skies.

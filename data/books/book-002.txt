@@ -1,0 +1,3 @@
+{"book_id":"book-002","title":"A Map of Quiet Bridges","author":"Rowan Flint","branch_id":"branch-2","copies":2}
+
+The map listed only bridges that could be crossed without waking the birds. Its final line led to a small island library.

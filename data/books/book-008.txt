@@ -1,0 +1,3 @@
+{"book_id":"book-008","title":"Walking the Paper Coast","author":"Finn Alder","branch_id":"branch-2","copies":2}
+
+The paper coast unfolded a little farther each day. Its travellers used smooth pebbles to keep yesterday's path from folding away.
