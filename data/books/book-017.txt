@@ -1,0 +1,3 @@
+{"book_id":"book-017","title":"The Signal on Lantern Hill","author":"Vera Reed","branch_id":"branch-2","copies":2}
+
+A single lantern signalled that the hill path was clear. When fog covered the town, neighbours placed lights along the way.

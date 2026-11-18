@@ -1,0 +1,58 @@
+services:
+  storage:
+    build: .
+    command: ["python", "-m", "uvicorn", "library_system.storage:app", "--host", "0.0.0.0", "--port", "8100"]
+    environment:
+      CATALOG_DB: /data/catalog.sqlite3
+    ports:
+      - "127.0.0.1:8100:8100"
+    volumes:
+      - catalog-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8100/health', timeout=1).read()"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+      start_period: 5s
+
+  branch-1:
+    build: .
+    environment:
+      BRANCH_ID: branch-1
+      STORAGE_URL: http://storage:8100
+      SYNC_INTERVAL_SECONDS: "1"
+      STORAGE_TIMEOUT_SECONDS: "1"
+    ports:
+      - "127.0.0.1:8001:8000"
+    depends_on:
+      storage:
+        condition: service_healthy
+
+  branch-2:
+    build: .
+    environment:
+      BRANCH_ID: branch-2
+      STORAGE_URL: http://storage:8100
+      SYNC_INTERVAL_SECONDS: "1"
+      STORAGE_TIMEOUT_SECONDS: "1"
+    ports:
+      - "127.0.0.1:8002:8000"
+    depends_on:
+      storage:
+        condition: service_healthy
+
+  branch-3:
+    build: .
+    environment:
+      BRANCH_ID: branch-3
+      STORAGE_URL: http://storage:8100
+      SYNC_INTERVAL_SECONDS: "1"
+      STORAGE_TIMEOUT_SECONDS: "1"
+    ports:
+      - "127.0.0.1:8003:8000"
+    depends_on:
+      storage:
+        condition: service_healthy
+
+volumes:
+  catalog-data:
