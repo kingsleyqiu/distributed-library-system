@@ -1,8 +1,13 @@
 # Shared interfaces: first implementation
 
-This phase contains three branch APIs and one **single-node storage stand-in**.
-The stand-in is an application-team development dependency. It has no Raft,
-leader election, replication, quorum acknowledgement, or failover.
+This phase contains three branch APIs and two interchangeable storage backends:
+
+- the **single-node storage stand-in** (`library_system/storage.py`), with no
+  replication, quorum, or failover; and
+- the **replicated storage cluster** (`library_system/replica.py` and
+  `library_system/consensus/`): three replicas with a durable replicated log,
+  majority commit, and catch-up for rejoining replicas. Automatic leader
+  election is not implemented yet; see [Replicated storage](#replicated-storage).
 
 The runnable contract is defined in `library_system/models.py` and in each
 service's `/docs` and `/openapi.json`. All example data is synthetic. Services
@@ -170,10 +175,13 @@ the future write path. The shared `CommandEnvelope` names the common fields:
 Operations are `borrow`, `return`, `renew`, `hold`, `add_book`, and
 `remove_book`. The envelope is scaffolding, not a complete business schema:
 for example, staff book metadata and an authenticated actor must still be
-specified by the responsible teammates. Neither service executes these
-operations. Valid requests return HTTP 501; a branch without usable storage
-synchronization returns HTTP 503. Validation errors return HTTP 422. No loan,
-hold, login, or staff operation should be represented as successfully completed.
+specified by the responsible teammates. No operation is executed yet: the
+replicated storage can commit commands, but no operation handlers are
+registered, so valid requests still return HTTP 501 (see
+[Command handlers](#command-handlers-circulation-team)). A branch without
+usable storage synchronization returns HTTP 503. Validation errors return
+HTTP 422. No loan, hold, login, or staff operation should be represented as
+successfully completed.
 
 Before implementing writes, agree on authentication, operation-specific input
 and output schemas, loan durations, renew limits, hold ordering, and removal
@@ -181,13 +189,140 @@ rules. The eventual leader must atomically check copy versions, deduplicate
 `request_id`, and return success only after the replicated commit succeeds.
 Branches must never treat an optimistic cache update as an authoritative loan.
 
-## Replacing the stand-in
+## Replicated storage
 
-The consensus implementation must preserve the read contract while advancing
-the catalog revision consistently across leader changes. The branch storage
-client is the integration point for leader discovery, redirects/retries,
-committed reads, and numbered notifications. A single configured storage URL
-today does not provide leader discovery or prove failover behavior.
+Three replicas (`storage-1` to `storage-3`) each keep a durable copy of the
+log and the catalog. They implement Raft log replication and majority commit.
+Leader election is a separate module, still to be written (see
+[Leadership hooks](#leadership-hooks-election-team)).
 
-Agree on these responsibilities with the consensus team before replacement;
-do not simulate a quorum or present the stand-in as replicated storage.
+| Service | Local URL (`run_local.py --replicated`) |
+| --- | --- |
+| storage-1 | `http://127.0.0.1:8101` (initial leader) |
+| storage-2 | `http://127.0.0.1:8102` |
+| storage-3 | `http://127.0.0.1:8103` |
+
+### Read contract (unchanged for branches)
+
+Every replica serves `GET /internal/catalog` and `GET /internal/catalog/version`
+with the same schemas as the stand-in. **Branch code is unchanged.** Each branch
+uses one replica as its `STORAGE_URL` (branch-N uses storage-N):
+
+- The **leader** answers from its committed, applied catalog. It answers only
+  after the no-op entry of its own term is applied (so it has applied
+  everything committed before it took over), and only while a majority has
+  answered it within the read lease (default 0.5 s). Otherwise it returns 503.
+- A **follower** forwards the request one hop to the leader it knows. If it
+  knows no leader, or that leader is unreachable, it returns 503. The branch
+  keeps its cache and marks it stale, as for any storage outage.
+
+`revision` advances by exactly one for each committed entry that changes the
+catalog. Every replica applies the same log, so the revision is identical on
+all replicas and never moves backwards across leader changes.
+
+### Write path
+
+`POST /internal/commands` (any replica; followers forward to the leader):
+
+1. If no handler is registered for the operation: **501**, and nothing is appended.
+2. The leader appends the entry with its term and a leader-assigned timestamp,
+   and replicates it.
+3. Once the entry is stored on a majority (2 of 3) and committed, it is applied
+   on every replica. The response is a `CommandResult` `{index, term, revision,
+   ok, result, error}`. `ok: false` means the handler deterministically
+   rejected the command; the catalog is unchanged.
+4. If commit is not confirmed within `RAFT_COMMIT_TIMEOUT_SECONDS` (default 5),
+   or the leader loses leadership first: **503, outcome unknown**. The entry
+   may still commit later, so clients must retry with the **same**
+   `request_id`, and deduplication by `request_id` belongs to the command
+   handlers.
+
+`POST /internal/raft/test/replace_catalog` `{"books": [...]}` replicates a
+whole-catalog replacement. It exists only when `RAFT_ENABLE_TEST_WRITES=1`
+and is for tests and demos only, not a staff editing API.
+
+### Durability and catch-up
+
+Each replica stores its term and vote, its log, and its applied catalog in one
+SQLite file (`RAFT_DB`, WAL mode, `synchronous=FULL`). Each change is on disk
+before the replica acknowledges it. A replica restarts as a follower from
+that file. The leader then finds where the two logs diverge, the replica
+discards any uncommitted conflicting entries, and the leader sends the missing
+entries in batches. An entry that has been applied is never truncated.
+
+### Internal Raft endpoints
+
+| Method and path | Purpose |
+| --- | --- |
+| `POST /internal/raft/append_entries` | Replication and heartbeat RPC (`AppendEntriesRequest` → `AppendEntriesResponse`) |
+| `GET /internal/raft/status` | `NodeStatus`: role, term, leader, commit/applied index, revision, and, on the leader, per-follower `match_index`, `lag`, and last contact. Intended for the dashboard. |
+| `POST /internal/raft/promote` | Development failover (see below); 409 if refused |
+| `GET /health` | `{"status": "ok", "mode": "raft-replica", node_id, role, term, leader_id, ...}` |
+
+### Leadership hooks (election team)
+
+`RaftNode` (`library_system/consensus/replication.py`) does not elect
+leaders. An election module drives it through:
+
+- `await node.become_leader(term)`: call after winning `term`. The node
+  appends a no-op entry and starts replicating, which also serves as heartbeats.
+- `await node.become_follower(term, leader_id)` and
+  `await node.set_term_vote(term, voted_for)`: durable term and vote changes.
+- `node.last_log_index_term()`: for the RequestVote up-to-date check.
+- `node.hooks` implements `ElectionHooks`:
+  - `on_valid_append_entries(term, leader_id)`: reset the election timer.
+  - `on_higher_term(term)`: the node has already stepped down.
+
+Until that module exists, `StaticLeadership`
+(`library_system/consensus/leadership.py`) stands in:
+
+- `RAFT_INITIAL_LEADER` claims leadership of a fresh cluster once a majority is
+  reachable. It defers if any replica already knows a leader.
+- `POST /internal/raft/promote` makes a replica leader after a failure. It
+  first checks that a majority is reachable and that none of them has a more
+  up-to-date log, as a Raft vote would.
+
+This is **manual failover, not election**: votes are not recorded on peers, so
+promote only one replica at a time. Replace `StaticLeadership` with the election
+module in `replica.py`; replication code should not need changes.
+
+### Command handlers (circulation team)
+
+Register one handler per operation on the `CatalogStateMachine` passed to
+`create_app(state_machine=...)`:
+
+```python
+def borrow(snapshot, command, context) -> CommandOutcome:
+    ...  # raise CommandRejected("reason") to refuse
+    return CommandOutcome(books=new_books, result={"due_date": ...})
+```
+
+Handlers run on **every replica**, in log order, and must be deterministic:
+
+- Use `context.timestamp` (fixed by the leader), never the wall clock.
+- No randomness and no I/O.
+- Return `books=None` to leave the catalog unchanged.
+
+All replicas must run the same handler code.
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `RAFT_NODE_ID` | `storage-1` | This replica's ID |
+| `RAFT_PEERS` | three loopback replicas on 8101-8103 | `id=url,...` for **every** replica, including this one |
+| `RAFT_DB` | `var/replica-<id>.sqlite3` | Durable state file |
+| `RAFT_INITIAL_LEADER` | `storage-1` | Replica that claims leadership of a fresh cluster; empty to disable |
+| `RAFT_HEARTBEAT_SECONDS` | `0.1` | Heartbeat / replication interval |
+| `RAFT_RPC_TIMEOUT_SECONDS` | `0.5` | Timeout for peer RPCs and forwarded reads |
+| `RAFT_COMMIT_TIMEOUT_SECONDS` | `5` | How long a write waits for a majority |
+| `RAFT_ENABLE_TEST_WRITES` | off | `1` enables the development replace endpoint |
+
+### Not yet provided
+
+- Automatic leader election and failure detection.
+- Log compaction or snapshots: the log grows without bound, which is
+  acceptable for the demo's scale.
+- Numbered change notifications to branches: branches still poll the version.
+- Linearizable reads under clock drift: the read lease assumes clocks run at
+  roughly the same rate on every replica.

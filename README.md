@@ -13,10 +13,14 @@ The first implementation contains the shared HTTP/data contracts, three branch
 APIs, catalog search and details, version-polled in-memory caches, and a persistent
 single-node storage stand-in with 20 original sample books.
 
-**This is not a Raft cluster yet.** Login, circulation, holds, the dashboard, and
-active update notifications remain with their assigned teammates. Reserved
-command routes return `501 Not Implemented`, or `503` at a branch without a
-usable storage synchronization. They never report a successful loan.
+A **replicated storage mode** runs three storage replicas with a durable
+replicated log, majority commit, and catch-up for rejoining replicas. Leaders
+are currently chosen by configuration or manual promotion; automatic leader
+election is still to come. Login, circulation, holds, the dashboard, and active
+update notifications remain with their assigned teammates. Command routes return
+`501 Not Implemented` until circulation handlers are registered, or `503` at a
+branch without a usable storage synchronization. They never report a
+successful loan.
 
 ## Run locally
 
@@ -56,6 +60,28 @@ Sample `.txt` books are imported only when creating a new database. Restarting
 does not erase catalog changes or reset its revision. Branch caches are memory
 only and are rebuilt from storage after restart.
 
+### Replicated storage mode
+
+```powershell
+.\.venv\Scripts\python.exe scripts/run_local.py --replicated --test-writes
+```
+
+This starts replicas on ports 8101-8103, with `storage-1` as the initial leader.
+Branch-N reads through replica storage-N, and followers forward to the
+leader. To watch replication, open <http://127.0.0.1:8101/internal/raft/status>,
+which shows the role, term, commit index, and each follower's lag. Some things
+to try:
+
+- Send a write to a follower with `POST /internal/raft/test/replace_catalog`
+  (development only; requires `--test-writes`).
+- Stop one replica: writes still commit with 2 of 3.
+- Restart it: it catches up from its log.
+- Stop the leader, then `POST /internal/raft/promote` on a follower to fail over.
+
+Replica state lives in `var/replica-storage-N.sqlite3`. See
+[Replicated storage](docs/INTERFACES.md#replicated-storage) for the full
+contract and configuration.
+
 ## Verify
 
 ```powershell
@@ -66,7 +92,20 @@ Tests cover search/filter contracts, malformed snapshots, revision rollback,
 cache failures/recovery, and durable storage. The acceptance test launches four
 real Python processes on temporary loopback ports, changes the storage catalog,
 stops storage, restarts a disconnected branch, and then checks reconnection.
-This tests the stand-in and caching, not consensus or leader failover.
+
+Replication tests cover:
+
+- majority commit, and refusal without a majority;
+- the Raft rule that an earlier-term entry commits only alongside a
+  current-term entry;
+- truncation of divergent logs, idempotent and reordered RPCs, and step-down
+  on a higher term;
+- the leader read barrier and read lease;
+- catch-up from disk.
+
+A second acceptance test kills and restarts three real replica processes to
+check majority commit, catch-up, and manual failover. Automatic leader election
+is not yet tested.
 
 ## Docker Compose
 
@@ -79,6 +118,8 @@ docker compose down
 
 The same service ports are published on localhost. Stop the native runner before
 starting Compose. Catalog data is retained in the `catalog-data` volume.
+For replicated storage use `docker compose -f compose.replicated.yaml up --build`.
+Each replica keeps its state in its own volume.
 Docker execution has not been verified in the current development environment.
 These services are a local development prototype without authentication; do not
 expose them to an external network.
@@ -96,7 +137,6 @@ reports that it is **not enforced** on this private repository under the current
 plan. Follow the PR workflow below; direct pushes are not currently blocked.
 
 - `main`: shared integration branch. Submit changes through a Pull Request (PR).
-- `kingsley`: Kingsley's personal working branch.
 - Teammates: create a branch using your own name after accepting a collaborator
   invitation. All branches share the same project files; separate code copies
   or folders per person are unnecessary.

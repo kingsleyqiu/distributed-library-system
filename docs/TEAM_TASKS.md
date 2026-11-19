@@ -23,11 +23,22 @@ and integrate through reviewed pull requests.
 
 ## Verification boundary
 
-This phase can demonstrate cross-branch search, version polling, warm-cache
-queries during an outage, unavailable cold starts, and resynchronization.
-It cannot demonstrate concurrent lending safety, majority commits, leader
-failover, replica recovery, or account permissions until the corresponding
-modules are implemented and tested.
+This phase can demonstrate:
+
+- cross-branch search, version polling, warm-cache queries during an outage,
+  unavailable cold starts, and resynchronization;
+- three-replica storage with log replication, majority commit (writes succeed
+  with 2 of 3 replicas and are refused with 1), catch-up of a restarted or
+  rejoining replica from its durable log, and **manual** failover by promoting
+  an up-to-date follower.
+
+It cannot yet demonstrate:
+
+- **automatic** leader election or failure detection. Replication exposes the
+  hooks for these (see `INTERFACES.md`, "Leadership hooks").
+- concurrent lending safety. The write path commits commands, but no
+  circulation handlers are registered yet (see "Command handlers").
+- account permissions.
 
 Docker Compose is supplied as the intended container configuration. The initial
 accepted verification uses native Python processes because Docker is not

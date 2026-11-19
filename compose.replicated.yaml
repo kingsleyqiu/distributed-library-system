@@ -1,0 +1,96 @@
+# Three storage replicas with log replication and majority commit.
+# Usage: docker compose -f compose.replicated.yaml up --build
+
+x-replica: &replica
+  build: .
+  command: ["python", "-m", "uvicorn", "library_system.replica:app", "--host", "0.0.0.0", "--port", "8100"]
+  healthcheck:
+    test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8100/health', timeout=1).read()"]
+    interval: 2s
+    timeout: 2s
+    retries: 5
+    start_period: 5s
+
+x-replica-env: &replica-env
+  RAFT_PEERS: storage-1=http://storage-1:8100,storage-2=http://storage-2:8100,storage-3=http://storage-3:8100
+  RAFT_INITIAL_LEADER: storage-1
+  RAFT_DB: /data/replica.sqlite3
+
+x-branch: &branch
+  build: .
+
+services:
+  storage-1:
+    <<: *replica
+    environment:
+      <<: *replica-env
+      RAFT_NODE_ID: storage-1
+    ports:
+      - "127.0.0.1:8101:8100"
+    volumes:
+      - replica-1-data:/data
+
+  storage-2:
+    <<: *replica
+    environment:
+      <<: *replica-env
+      RAFT_NODE_ID: storage-2
+    ports:
+      - "127.0.0.1:8102:8100"
+    volumes:
+      - replica-2-data:/data
+
+  storage-3:
+    <<: *replica
+    environment:
+      <<: *replica-env
+      RAFT_NODE_ID: storage-3
+    ports:
+      - "127.0.0.1:8103:8100"
+    volumes:
+      - replica-3-data:/data
+
+  # Each branch reads through a different replica; followers forward to the leader.
+  branch-1:
+    <<: *branch
+    environment:
+      BRANCH_ID: branch-1
+      STORAGE_URL: http://storage-1:8100
+      SYNC_INTERVAL_SECONDS: "1"
+      STORAGE_TIMEOUT_SECONDS: "1"
+    ports:
+      - "127.0.0.1:8001:8000"
+    depends_on:
+      storage-1:
+        condition: service_healthy
+
+  branch-2:
+    <<: *branch
+    environment:
+      BRANCH_ID: branch-2
+      STORAGE_URL: http://storage-2:8100
+      SYNC_INTERVAL_SECONDS: "1"
+      STORAGE_TIMEOUT_SECONDS: "1"
+    ports:
+      - "127.0.0.1:8002:8000"
+    depends_on:
+      storage-2:
+        condition: service_healthy
+
+  branch-3:
+    <<: *branch
+    environment:
+      BRANCH_ID: branch-3
+      STORAGE_URL: http://storage-3:8100
+      SYNC_INTERVAL_SECONDS: "1"
+      STORAGE_TIMEOUT_SECONDS: "1"
+    ports:
+      - "127.0.0.1:8003:8000"
+    depends_on:
+      storage-3:
+        condition: service_healthy
+
+volumes:
+  replica-1-data:
+  replica-2-data:
+  replica-3-data:

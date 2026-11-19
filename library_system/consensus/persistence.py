@@ -1,6 +1,6 @@
-"""Durable Raft state for one storage replica, kept in a single SQLite file.
+"""Durable Raft state for one storage replica, kept in an SQLite file.
 
-Everything a replica must remember across a crash lives here:
+Everything a replica must keep across a crash lives here:
 
 * ``meta``  - the current term and the vote cast in it (Raft's persistent state);
 * ``log``   - every log entry, keyed by index;
