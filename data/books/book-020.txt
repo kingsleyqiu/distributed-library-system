@@ -1,0 +1,3 @@
+{"book_id":"book-020","title":"The Library After Dawn","author":"Sana Grey","branch_id":"branch-2","copies":2}
+
+After dawn, the library opened its courtyard to readers and sparrows. A shared table held a fresh notebook for stories still being imagined.

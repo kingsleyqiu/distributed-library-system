@@ -1,0 +1,3 @@
+{"book_id":"book-014","title":"A Harbor Made of Bells","author":"Jules Shore","branch_id":"branch-2","copies":2}
+
+The harbour bells marked the arrival of boats too small to see from the pier. One morning they rang for a folded paper fleet.
