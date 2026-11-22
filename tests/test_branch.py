@@ -1,6 +1,7 @@
 from collections import Counter
 from datetime import datetime
 from time import monotonic, sleep
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -155,6 +156,16 @@ def test_detail_retains_all_copies_and_unknown_book_is_404(client):
     assert response.status_code == 200
     assert len(response.json()["book"]["copies"]) == 2
     assert client.get("/books/missing").status_code == 404
+
+
+@pytest.mark.parametrize("book_id", ["series/book-1", "系列/书籍 1"])
+def test_detail_can_retrieve_ids_returned_by_search(storage, book_id):
+    storage.catalog["books"][0]["book_id"] = book_id
+    with branch_client(storage) as client:
+        listed = client.get("/books", params={"q": "Tanenbaum"}).json()["books"][0]
+        response = client.get("/books/" + quote(listed["book_id"], safe=""))
+        assert response.status_code == 200
+        assert response.json()["book"] == listed
 
 
 def test_unchanged_revision_does_not_download_another_snapshot(client, storage):
