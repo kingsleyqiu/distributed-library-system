@@ -163,7 +163,7 @@ def create_app(
             results.append(book.model_copy(update={"copies": copies}))
         return BookSearchResult(books=tuple(results), total=len(results), cache=metadata)
 
-    @app.get("/books/{book_id}", response_model=BookDetailResult)
+    @app.get("/books/{book_id:path}", response_model=BookDetailResult)
     async def book_detail(book_id: str):
         cache = app.state.catalog_cache
         metadata = cache.metadata()

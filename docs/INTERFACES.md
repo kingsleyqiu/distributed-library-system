@@ -107,6 +107,10 @@ only matching copies. With no copy filters, titles with no remaining copies
 can also be returned. The detail endpoint returns all copies. `total` counts
 titles, not copies.
 
+Book IDs are opaque strings. URL-encode the ID when constructing a detail URL;
+IDs containing slashes, spaces, or Unicode text are supported by the detail
+route as well as by search results.
+
 Search returns `{"books": [...], "total": 20, "cache": {...}}`; detail returns
 `{"book": {...}, "cache": {...}}`. Every successful response includes:
 
