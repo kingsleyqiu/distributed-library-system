@@ -136,6 +136,21 @@ class AppendEntriesResponse(Contract):
     conflict_term: int | None = Field(default=None, ge=1)
 
 
+class RequestVoteRequest(Contract):
+    """A candidate asks for a vote in `term` (Raft section 5.2). The last log
+    index and term let the voter refuse a candidate whose log is behind."""
+
+    term: int = Field(ge=1)
+    candidate_id: str = Field(min_length=1, max_length=64)
+    last_log_index: int = Field(ge=0)
+    last_log_term: int = Field(ge=0)
+
+
+class RequestVoteResponse(Contract):
+    term: int = Field(ge=0)
+    vote_granted: bool
+
+
 class CommandResult(Contract):
     """Outcome of a committed and applied entry. `ok` is false when the state
     machine deterministically rejected it; the entry is still committed."""

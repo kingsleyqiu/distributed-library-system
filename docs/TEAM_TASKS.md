@@ -29,13 +29,12 @@ This phase can demonstrate:
   unavailable cold starts, and resynchronization;
 - three-replica storage with log replication, majority commit (writes succeed
   with 2 of 3 replicas and are refused with 1), catch-up of a restarted or
-  rejoining replica from its durable log, and **manual** failover by promoting
-  an up-to-date follower.
+  rejoining replica from its durable log, and **automatic** leader election
+  with heartbeat failure detection, terms, and check-quorum (failover in about
+  2 s; see `scripts/measure_failover.py`).
 
 It cannot yet demonstrate:
 
-- **automatic** leader election or failure detection. Replication exposes the
-  hooks for these (see `INTERFACES.md`, "Leadership hooks").
 - concurrent lending safety. The write path commits commands, but no
   circulation handlers are registered yet (see "Command handlers").
 - account permissions.

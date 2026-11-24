@@ -6,8 +6,8 @@ This phase contains three branch APIs and two interchangeable storage backends:
   replication, quorum, or failover; and
 - the **replicated storage cluster** (`library_system/replica.py` and
   `library_system/consensus/`): three replicas with a durable replicated log,
-  majority commit, and catch-up for rejoining replicas. Automatic leader
-  election is not implemented yet; see [Replicated storage](#replicated-storage).
+  majority commit, catch-up for rejoining replicas, and automatic leader
+  election; see [Replicated storage](#replicated-storage).
 
 The runnable contract is defined in `library_system/models.py` and in each
 service's `/docs` and `/openapi.json`. All example data is synthetic. Services
@@ -192,13 +192,13 @@ Branches must never treat an optimistic cache update as an authoritative loan.
 ## Replicated storage
 
 Three replicas (`storage-1` to `storage-3`) each keep a durable copy of the
-log and the catalog. They implement Raft log replication and majority commit.
-Leader election is a separate module, still to be written (see
-[Leadership hooks](#leadership-hooks-election-team)).
+log and the catalog. They implement Raft log replication and majority commit,
+and elect their leader automatically (see
+[Leader election](#leader-election)).
 
 | Service | Local URL (`run_local.py --replicated`) |
 | --- | --- |
-| storage-1 | `http://127.0.0.1:8101` (initial leader) |
+| storage-1 | `http://127.0.0.1:8101` (favoured in the first election) |
 | storage-2 | `http://127.0.0.1:8102` |
 | storage-3 | `http://127.0.0.1:8103` |
 
@@ -255,36 +255,47 @@ entries in batches. An entry that has been applied is never truncated.
 | Method and path | Purpose |
 | --- | --- |
 | `POST /internal/raft/append_entries` | Replication and heartbeat RPC (`AppendEntriesRequest` → `AppendEntriesResponse`) |
+| `POST /internal/raft/request_vote` | Election RPC (`RequestVoteRequest` → `RequestVoteResponse`) |
 | `GET /internal/raft/status` | `NodeStatus`: role, term, leader, commit/applied index, revision, and, on the leader, per-follower `match_index`, `lag`, and last contact. Intended for the dashboard. |
-| `POST /internal/raft/promote` | Development failover (see below); 409 if refused |
+| `POST /internal/raft/promote` | Demo: start an election on this replica now (a real vote); `NodeStatus` if it wins, 409 if not |
 | `GET /health` | `{"status": "ok", "mode": "raft-replica", node_id, role, term, leader_id, ...}` |
 
-### Leadership hooks (election team)
+### Leader election
 
-`RaftNode` (`library_system/consensus/replication.py`) does not elect
-leaders. An election module drives it through:
+`RaftElection` (`library_system/consensus/election.py`) elects leaders
+(Raft section 5.2); `RaftNode` handles replication and does not decide who
+leads.
 
-- `await node.become_leader(term)`: call after winning `term`. The node
-  appends a no-op entry and starts replicating, which also serves as heartbeats.
-- `await node.become_follower(term, leader_id)` and
-  `await node.set_term_vote(term, voted_for)`: durable term and vote changes.
-- `node.last_log_index_term()`: for the RequestVote up-to-date check.
-- `node.hooks` implements `ElectionHooks`:
-  - `on_valid_append_entries(term, leader_id)`: reset the election timer.
-  - `on_higher_term(term)`: the node has already stepped down.
+- **Failure detection.** The leader's AppendEntries every
+  `RAFT_HEARTBEAT_SECONDS` are the heartbeats. Each follower keeps a random
+  election timeout between `RAFT_ELECTION_TIMEOUT_MIN_SECONDS` and `_MAX_`
+  (default 1.5-3.0 s), reset by every valid heartbeat and every vote it grants.
+- **Election.** When the timeout passes, the follower becomes a candidate:
+  it moves to the next term, durably votes for itself, and asks both peers for
+  a vote in parallel. A replica grants at most one vote per term (saved to disk
+  before it answers), and only to a candidate whose log is at least as up to
+  date as its own. With 2 of 3 votes the candidate becomes leader, appends the
+  term's no-op entry, and starts heartbeats. A split or lost election is retried
+  in the next term after a new random timeout.
+- **Terms.** Any message with a higher term makes a replica a follower in that
+  term, so an old leader that returns steps down and cannot commit.
+- **Check-quorum.** A leader that has not heard from a majority (counting
+  itself) within one minimum election timeout steps down, so a cut-off leader
+  does not keep claiming leadership.
+- **Timing rule.** The minimum election timeout must exceed the read lease
+  plus `RAFT_RPC_TIMEOUT_SECONDS`, so an old leader stops serving reads before
+  a new one can be elected. `create_app` refuses configurations that break it.
+- `RAFT_INITIAL_LEADER` only shortens that replica's *first* timeout, so a
+  fresh cluster usually elects it; it is still a normal vote.
 
-Until that module exists, `StaticLeadership`
-(`library_system/consensus/leadership.py`) stands in:
-
-- `RAFT_INITIAL_LEADER` claims leadership of a fresh cluster once a majority is
-  reachable. It defers if any replica already knows a leader.
-- `POST /internal/raft/promote` makes a replica leader after a failure. It
-  first checks that a majority is reachable and that none of them has a more
-  up-to-date log, as a Raft vote would.
-
-This is **manual failover, not election**: votes are not recorded on peers, so
-promote only one replica at a time. Replace `StaticLeadership` with the election
-module in `replica.py`; replication code should not need changes.
+Interfaces between the two modules: `RaftElection` calls
+`node.begin_candidacy()`, `node.become_leader(term)`,
+`node.become_follower(term, leader_id)`, `node.step_down(term)`,
+`node.handle_request_vote(request)` (atomic under the node's lock), and
+`node.recent_contacts(seconds)`. `RaftNode` calls back through
+`ElectionHooks`: `on_valid_append_entries(term, leader_id)` and
+`on_higher_term(term)`. `scripts/measure_failover.py` times failover on real
+processes (about 1.9 s on average with the defaults).
 
 ### Command handlers (circulation team)
 
@@ -312,15 +323,18 @@ All replicas must run the same handler code.
 | `RAFT_NODE_ID` | `storage-1` | This replica's ID |
 | `RAFT_PEERS` | three loopback replicas on 8101-8103 | `id=url,...` for **every** replica, including this one |
 | `RAFT_DB` | `var/replica-<id>.sqlite3` | Durable state file |
-| `RAFT_INITIAL_LEADER` | `storage-1` | Replica that claims leadership of a fresh cluster; empty to disable |
+| `RAFT_INITIAL_LEADER` | `storage-1` | Replica with a short first election timeout, so a fresh cluster usually elects it; empty to disable |
 | `RAFT_HEARTBEAT_SECONDS` | `0.1` | Heartbeat / replication interval |
 | `RAFT_RPC_TIMEOUT_SECONDS` | `0.5` | Timeout for peer RPCs and forwarded reads |
 | `RAFT_COMMIT_TIMEOUT_SECONDS` | `5` | How long a write waits for a majority |
+| `RAFT_ELECTION_TIMEOUT_MIN_SECONDS` | `1.5` | Shortest random election timeout; must exceed read lease + RPC timeout |
+| `RAFT_ELECTION_TIMEOUT_MAX_SECONDS` | `3.0` | Longest random election timeout |
 | `RAFT_ENABLE_TEST_WRITES` | off | `1` enables the development replace endpoint |
 
 ### Not yet provided
 
-- Automatic leader election and failure detection.
+- Pre-vote: a replica that was cut off can force one extra election when it
+  rejoins, because it comes back with a higher term.
 - Log compaction or snapshots: the log grows without bound, which is
   acceptable for the demo's scale.
 - Numbered change notifications to branches: branches still poll the version.

@@ -1,8 +1,9 @@
 """Run storage and three branch nodes; Ctrl+C stops them all.
 
 Default: the single-node storage stand-in on port 8100.
-``--replicated``: three storage replicas on ports 8101-8103 (storage-1 starts
-as leader), with branch-N reading through replica storage-N.
+``--replicated``: three storage replicas on ports 8101-8103 that elect their
+own leader (storage-1 is favoured in the first election), with branch-N
+reading through replica storage-N.
 """
 
 import argparse
@@ -31,6 +32,8 @@ def storage_services(replicated: bool, test_writes: bool) -> list[tuple[str, int
                 "RAFT_PEERS": cluster,
                 "RAFT_DB": f"var/replica-{node}.sqlite3",
                 "RAFT_INITIAL_LEADER": "storage-1",
+                "RAFT_ELECTION_TIMEOUT_MIN_SECONDS": os.getenv("RAFT_ELECTION_TIMEOUT_MIN_SECONDS", "1.5"),
+                "RAFT_ELECTION_TIMEOUT_MAX_SECONDS": os.getenv("RAFT_ELECTION_TIMEOUT_MAX_SECONDS", "3.0"),
                 "RAFT_ENABLE_TEST_WRITES": "1" if test_writes else "0",
             },
         )

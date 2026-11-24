@@ -1,10 +1,11 @@
 """Raft log replication, majority commit, and catch-up for one storage replica.
 
 Leader election is deliberately *not* here. Leadership is decided outside this
-class and handed in through two hooks, ``become_leader(term)`` and
-``become_follower(term, leader_id)``. The node in turn reports events the
-election module needs through ``ElectionHooks``. Until the election module
-exists, ``library_system.consensus.leadership.StaticLeadership`` drives the hooks.
+class (``library_system.consensus.election.RaftElection``) and handed in through
+``begin_candidacy()``, ``become_leader(term)``, ``become_follower(term, leader_id)``
+and ``step_down(term)``. The node answers votes atomically in
+``handle_request_vote`` and reports the events the election module needs
+through ``ElectionHooks``.
 
 Replication outline (Raft section 5.3):
 
@@ -45,6 +46,8 @@ from library_system.models import (
     NodeStatus,
     PeerProgress,
     RaftRole,
+    RequestVoteRequest,
+    RequestVoteResponse,
 )
 
 
@@ -163,8 +166,8 @@ class RaftNode:
     # --- leadership hooks (driven by the election module) ------------------
 
     async def become_leader(self, term: int) -> None:
-        """Take leadership for ``term``. The caller must have won it (or, for
-        the static stand-in, verified a majority considers this log up to date)."""
+        """Take leadership for ``term``. The caller (the election module) must
+        have won it with votes from a majority."""
         async with self._lock:
             if self._closed:
                 raise RuntimeError("Replica is stopped")
@@ -173,6 +176,10 @@ class RaftNode:
             if term == self.current_term and self.voted_for not in (None, self.node_id):
                 raise ValueError(f"Already voted for {self.voted_for} in term {term}")
             await self._persist_term_vote(term, self.node_id)
+            # Raise the read barrier before taking the role: the append below
+            # awaits, and a read served in that gap must not see the old
+            # barrier and answer from a possibly stale applied state.
+            self._barrier_index = len(self.log) + 1
             self.role = "leader"
             self.leader_id = self.node_id
             last_index = len(self.log)
@@ -205,6 +212,60 @@ class RaftNode:
 
     def last_log_index_term(self) -> tuple[int, int]:
         return (len(self.log), self.log[-1].term) if self.log else (0, 0)
+
+    # --- election support (driven by RaftElection) -------------------------
+
+    async def begin_candidacy(self) -> int:
+        """Start an election: move to the next term and durably vote for
+        ourselves before any vote request is sent. Returns the new term."""
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("Replica is stopped")
+            if self.role == "leader":
+                raise ValueError(f"Already leader for term {self.current_term}")
+            term = self.current_term + 1
+            await self._persist_term_vote(term, self.node_id)
+            self.role = "candidate"
+            self.leader_id = None
+            logger.info("%s is a candidate for term %d", self.node_id, term)
+            return term
+
+    async def step_down(self, term: int) -> bool:
+        """Give up leadership of ``term`` (check-quorum). Does nothing if this
+        node has meanwhile left that term or stopped leading. Returns True if
+        it stepped down."""
+        async with self._lock:
+            if self.role != "leader" or self.current_term != term:
+                return False
+            await self._step_down_locked(term, None)
+            return True
+
+    async def handle_request_vote(self, request: RequestVoteRequest) -> RequestVoteResponse:
+        """Raft RequestVote (section 5.2 and 5.4.1), atomic with term changes
+        from AppendEntries. The vote is on disk before the reply is sent."""
+        async with self._lock:
+            if request.term < self.current_term:
+                return RequestVoteResponse(term=self.current_term, vote_granted=False)
+            higher = request.term > self.current_term
+            if higher:
+                await self._step_down_locked(request.term, None)
+            last_index, last_term = self.last_log_index_term()
+            up_to_date = (request.last_log_term, request.last_log_index) >= (last_term, last_index)
+            grant = up_to_date and self.voted_for in (None, request.candidate_id)
+            if grant:
+                await self._persist_term_vote(self.current_term, request.candidate_id)
+            response = RequestVoteResponse(term=self.current_term, vote_granted=grant)
+        if higher:
+            self.hooks.on_higher_term(request.term)
+        return response
+
+    def recent_contacts(self, within_seconds: float) -> int:
+        """How many peers acknowledged this leader within the last
+        ``within_seconds`` (0 when not leader). Used for check-quorum."""
+        if self.role != "leader":
+            return 0
+        now = self.clock()
+        return sum(1 for at in self._last_ack.values() if now - at <= within_seconds)
 
     # --- client operations (leader only) ---
 

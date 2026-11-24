@@ -1,6 +1,6 @@
 """Replicated catalog storage: durable log, replication, and majority commit."""
 
-from library_system.consensus.leadership import PromotionRefused, StaticLeadership
+from library_system.consensus.election import RaftElection
 from library_system.consensus.persistence import PersistentState, RaftStore
 from library_system.consensus.replication import (
     CommitUnknownError,
@@ -38,8 +38,7 @@ __all__ = [
     "PeerTransport",
     "PeerUnavailable",
     "PersistentState",
-    "PromotionRefused",
+    "RaftElection",
     "RaftNode",
     "RaftStore",
-    "StaticLeadership",
 ]

@@ -14,9 +14,9 @@ APIs, catalog search and details, version-polled in-memory caches, and a persist
 single-node storage stand-in with 20 original sample books.
 
 A **replicated storage mode** runs three storage replicas with a durable
-replicated log, majority commit, and catch-up for rejoining replicas. Leaders
-are currently chosen by configuration or manual promotion; automatic leader
-election is still to come. Login, circulation, holds, the dashboard, and active
+replicated log, majority commit, catch-up for rejoining replicas, and
+automatic leader election (Raft RequestVote with heartbeat failure detection,
+terms, and check-quorum). Login, circulation, holds, the dashboard, and active
 update notifications remain with their assigned teammates. Command routes return
 `501 Not Implemented` until circulation handlers are registered, or `503` at a
 branch without a usable storage synchronization. They never report a
@@ -66,17 +66,25 @@ only and are rebuilt from storage after restart.
 .\.venv\Scripts\python.exe scripts/run_local.py --replicated --test-writes
 ```
 
-This starts replicas on ports 8101-8103, with `storage-1` as the initial leader.
+This starts replicas on ports 8101-8103. They elect a leader by themselves;
+`storage-1` is favoured in the first election so demos start predictably.
 Branch-N reads through replica storage-N, and followers forward to the
 leader. To watch replication, open <http://127.0.0.1:8101/internal/raft/status>,
-which shows the role, term, commit index, and each follower's lag. Some things
-to try:
+which shows the role, term, vote, commit index, and each follower's lag. Some
+things to try:
 
 - Send a write to a follower with `POST /internal/raft/test/replace_catalog`
   (development only; requires `--test-writes`).
 - Stop one replica: writes still commit with 2 of 3.
 - Restart it: it catches up from its log.
-- Stop the leader, then `POST /internal/raft/promote` on a follower to fail over.
+- Stop the leader: within about 2 seconds the other two elect a new leader in a
+  higher term. Restart it: it rejoins as a follower.
+- `POST /internal/raft/promote` on a follower starts an election there right
+  away (a real vote; 409 if it does not win). Useful to show an election live.
+
+`run_local.py` stops every service when one exits, so to stop a single replica
+start the three replicas in separate terminals or use Docker Compose. To measure
+failover time, run `python scripts/measure_failover.py --runs 10`.
 
 Replica state lives in `var/replica-storage-N.sqlite3`. See
 [Replicated storage](docs/INTERFACES.md#replicated-storage) for the full
@@ -103,9 +111,14 @@ Replication tests cover:
 - the leader read barrier and read lease;
 - catch-up from disk.
 
-A second acceptance test kills and restarts three real replica processes to
-check majority commit, catch-up, and manual failover. Automatic leader election
-is not yet tested.
+Election tests cover a fresh start, the vote rules and their durability,
+leader crash, a partitioned leader (it stops serving reads and steps down) and
+a partitioned follower, split votes, no majority, and at most one leader per
+term under random crashes and partitions.
+
+Acceptance tests kill, restart, and pause real replica processes to check
+majority commit, catch-up, automatic failover, the "start election now"
+trigger, and a paused leader stepping down when it resumes (POSIX only).
 
 ## Docker Compose
 

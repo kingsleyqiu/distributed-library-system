@@ -1,4 +1,5 @@
-# Three storage replicas with log replication and majority commit.
+# Three storage replicas with log replication, majority commit, and automatic
+# leader election (Raft RequestVote with heartbeat failure detection).
 # Usage: docker compose -f compose.replicated.yaml up --build
 
 x-replica: &replica
@@ -13,7 +14,9 @@ x-replica: &replica
 
 x-replica-env: &replica-env
   RAFT_PEERS: storage-1=http://storage-1:8100,storage-2=http://storage-2:8100,storage-3=http://storage-3:8100
-  RAFT_INITIAL_LEADER: storage-1
+  RAFT_INITIAL_LEADER: storage-1  # favoured in the first election only
+  RAFT_ELECTION_TIMEOUT_MIN_SECONDS: "1.5"
+  RAFT_ELECTION_TIMEOUT_MAX_SECONDS: "3.0"
   RAFT_DB: /data/replica.sqlite3
 
 x-branch: &branch

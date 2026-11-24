@@ -22,10 +22,9 @@ from library_system.consensus import (
     HttpTransport,
     NotLeaderError,
     NotReadyError,
-    PromotionRefused,
+    RaftElection,
     RaftNode,
     RaftStore,
-    StaticLeadership,
 )
 from library_system.models import (
     AppendEntriesRequest,
@@ -36,6 +35,8 @@ from library_system.models import (
     CommandResult,
     NodeStatus,
     ReplaceCatalogRequest,
+    RequestVoteRequest,
+    RequestVoteResponse,
 )
 from library_system.storage import DEFAULT_BOOKS_DIR
 
@@ -49,10 +50,12 @@ FORWARDED_HEADER = "x-raft-forwarded-by"
 
 
 class _HideHeartbeats(logging.Filter):
-    """Heartbeats arrive many times a second; keep them out of access logs."""
+    """Heartbeats arrive many times a second; keep them (and vote requests)
+    out of access logs."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return "/internal/raft/append_entries" not in record.getMessage()
+        message = record.getMessage()
+        return "/internal/raft/append_entries" not in message and "/internal/raft/request_vote" not in message
 
 
 logging.getLogger("uvicorn.access").addFilter(_HideHeartbeats())
@@ -77,6 +80,8 @@ def create_app(
     heartbeat_interval: float = 0.1,
     rpc_timeout: float = 0.5,
     commit_timeout: float = 5.0,
+    election_timeout_min: float = 1.5,
+    election_timeout_max: float = 3.0,
     enable_test_writes: bool = False,
     state_machine: CatalogStateMachine | None = None,
     books_dir: str | Path = DEFAULT_BOOKS_DIR,
@@ -90,9 +95,23 @@ def create_app(
         ("heartbeat_interval", heartbeat_interval),
         ("rpc_timeout", rpc_timeout),
         ("commit_timeout", commit_timeout),
+        ("election_timeout_min", election_timeout_min),
+        ("election_timeout_max", election_timeout_max),
     ):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be a positive finite number")
+    if election_timeout_max < election_timeout_min:
+        raise ValueError("election_timeout_max must be at least election_timeout_min")
+    # Same default lease as RaftNode. An old leader must stop serving reads
+    # before a new one can be elected: a follower's timer starts when it
+    # receives a heartbeat, the leader's lease when the ack gets back (up to
+    # one RPC timeout later).
+    read_lease = max(0.5, 5 * heartbeat_interval)
+    if election_timeout_min <= read_lease + rpc_timeout:
+        raise ValueError(
+            f"election_timeout_min ({election_timeout_min}s) must exceed the read lease "
+            f"({read_lease}s) plus rpc_timeout ({rpc_timeout}s)"
+        )
     peer_urls = {peer: url for peer, url in cluster.items() if peer != node_id}
     machine = state_machine or CatalogStateMachine()
     db_path = db_path or f"var/replica-{node_id}.sqlite3"
@@ -109,7 +128,12 @@ def create_app(
             heartbeat_interval=heartbeat_interval,
             commit_timeout=commit_timeout,
         )
-        leadership = StaticLeadership(node, transport, initial_leader)
+        leadership = RaftElection(
+            node,
+            transport,
+            election_timeout=(election_timeout_min, election_timeout_max),
+            initial_leader=initial_leader,
+        )
         await node.start()
         await leadership.start()
         app.state.node = node
@@ -210,17 +234,22 @@ def create_app(
         except RuntimeError as error:
             raise HTTPException(409, str(error))
 
+    @app.post("/internal/raft/request_vote", response_model=RequestVoteResponse)
+    async def request_vote(vote: RequestVoteRequest):
+        return await app.state.leadership.handle_request_vote(vote)
+
     @app.get("/internal/raft/status", response_model=NodeStatus)
     def raft_status():
         return app.state.node.status()
 
     @app.post("/internal/raft/promote", response_model=NodeStatus)
     async def promote():
-        """Development failover until automatic leader election exists."""
-        try:
-            return await app.state.leadership.promote()
-        except PromotionRefused as reason:
-            raise HTTPException(409, str(reason))
+        """Demo: start an election on this replica now, without waiting for
+        its timer. It is a real vote: 409 if the replica does not win."""
+        status = await app.state.leadership.start_election_now()
+        if status.role != "leader":
+            raise HTTPException(409, f"Election for term {status.term} not won (role: {status.role})")
+        return status
 
     if enable_test_writes:
 
@@ -247,6 +276,8 @@ def create_app_from_env() -> FastAPI:
         heartbeat_interval=float(os.getenv("RAFT_HEARTBEAT_SECONDS", "0.1")),
         rpc_timeout=float(os.getenv("RAFT_RPC_TIMEOUT_SECONDS", "0.5")),
         commit_timeout=float(os.getenv("RAFT_COMMIT_TIMEOUT_SECONDS", "5")),
+        election_timeout_min=float(os.getenv("RAFT_ELECTION_TIMEOUT_MIN_SECONDS", "1.5")),
+        election_timeout_max=float(os.getenv("RAFT_ELECTION_TIMEOUT_MAX_SECONDS", "3.0")),
         enable_test_writes=os.getenv("RAFT_ENABLE_TEST_WRITES") == "1",
     )
 
