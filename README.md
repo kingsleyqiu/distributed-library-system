@@ -16,11 +16,11 @@ single-node storage stand-in with 20 original sample books.
 A **replicated storage mode** runs three storage replicas with a durable
 replicated log, majority commit, catch-up for rejoining replicas, and
 automatic leader election (Raft RequestVote with heartbeat failure detection,
-terms, and check-quorum). Login, circulation, holds, the dashboard, and active
-update notifications remain with their assigned teammates. Command routes return
-`501 Not Implemented` until circulation handlers are registered, or `503` at a
-branch without a usable storage synchronization. They never report a
-successful loan.
+terms, and check-quorum). Both storage modes support borrowing, returns,
+renewals, FIFO holds, optimistic copy-version checks, and durable request-ID
+deduplication. Branches forward commands to authoritative storage and refresh
+their caches after a result. Login, staff catalog commands, the dashboard, and
+active update notifications remain unfinished.
 
 ## Run locally
 
@@ -52,13 +52,58 @@ check time, and a `stale` flag. Branches check the catalog version every second.
 After a failed synchronization they retain the last snapshot and mark it stale.
 A disconnected branch that has no cached snapshot returns `503`; it recovers
 automatically when storage becomes reachable. A recently successful check does
-not guarantee that cached availability is current; future loans must be checked
-and committed by storage.
+not guarantee that cached availability is current; loans are checked and
+committed by storage.
 
 The stand-in persists its catalog and revision in `var/catalog.sqlite3`.
 Sample `.txt` books are imported only when creating a new database. Restarting
 does not erase catalog changes or reset its revision. Branch caches are memory
 only and are rebuilt from storage after restart.
+
+### Borrow, return, renew, and hold
+
+Send commands to `POST /commands` on any branch (or `POST /internal/commands`
+on storage). A borrow request looks like this:
+
+```json
+{
+  "request_id": "borrow-alice-001",
+  "operation": "borrow",
+  "actor_id": "alice",
+  "book_id": "book-001",
+  "copy_id": "book-001-copy-1",
+  "expected_version": 0
+}
+```
+
+Use the copy's current `version` from `/books/{book_id}`. A successful borrow
+sets a due date **14 days** after storage's UTC date and increments the copy
+version. For `return` or `renew`, use the same borrower and copy, a new request
+ID, and the latest version. Renewals add 14 days to the due date, up to twice;
+o renewal is allowed when the loan is overdue or someone has a hold.
+
+To place a title-level FIFO hold, omit `copy_id` and `expected_version`:
+
+```json
+{
+  "request_id": "hold-bob-001",
+  "operation": "hold",
+  "actor_id": "bob",
+  "book_id": "book-001"
+}
+```
+
+Only the first waiting patron may borrow while the queue is nonempty; that
+borrow consumes their hold. Returns make a copy available without automatically
+lending it. Holds do not currently expire or support cancellation.
+
+HTTP 200 returns a `CommandResult`: inspect `ok`, `error`, and `result`.
+Business refusals such as `version_conflict` return `ok: false`. Reuse the
+**same request ID and identical payload** after a timeout or HTTP 503: the
+original result is persisted with the catalog and returned on retry, including
+after restart or replica failover. Changing a payload requires a new ID;
+reusing an ID for another payload returns `request_id_conflict`.
+`actor_id` is still client supplied until the login module is integrated.
 
 ### Replicated storage mode
 
@@ -93,10 +138,12 @@ contract and configuration.
 ## Verify
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q --basetemp=.pytest_cache/tmp
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Tests cover search/filter contracts, malformed snapshots, revision rollback,
+Tests cover circulation rules, concurrent borrows, FIFO holds, request-ID
+conflicts, lost responses, durable retries after restart/failover, transaction
+rollback, search/filter contracts, malformed snapshots, revision rollback,
 cache failures/recovery, and durable storage. The acceptance test launches four
 real Python processes on temporary loopback ports, changes the storage catalog,
 stops storage, restarts a disconnected branch, and then checks reconnection.

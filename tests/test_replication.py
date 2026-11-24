@@ -332,10 +332,13 @@ def test_registered_command_handlers_are_replicated(run_cluster):
         result = await c[1].submit("command", command=command)
         assert result.ok and result.revision == 2 and result.result == {"copy_id": "book-001-copy-1"}
 
-        rejected = await c[1].submit("command", command=command)  # Stale expected_version.
+        assert await c[1].submit("command", command=command) == result
+        rejected = await c[1].submit(
+            "command", command=command.model_copy(update={"request_id": "r2"}),
+        )  # New request with a stale expected_version.
         assert not rejected.ok and rejected.error == "Version mismatch" and rejected.revision == 2
 
-        unknown = await c[1].submit("command", command=command.model_copy(update={"operation": "renew"}))
+        unknown = await c[1].submit("command", command=command.model_copy(update={"request_id": "r3", "operation": "renew"}))
         assert not unknown.ok and "No handler" in unknown.error
 
         await eventually(lambda: all(n.last_applied == c[1].last_applied for n in c.nodes.values()))

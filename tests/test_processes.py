@@ -107,7 +107,7 @@ def test_three_branches_refresh_disconnect_cold_restart_and_recover(tmp_path):
                     assert cached["total"] == 20
                     assert cached["cache"]["stale"]
                     assert cached["cache"]["revision"] == updated.revision
-                    command = {"request_id": "offline-1", "operation": "borrow", "actor_id": "demo", "book_id": "book-001"}
+                    command = {"request_id": "offline-1", "operation": "borrow", "actor_id": "demo", "book_id": "book-001", "copy_id": "book-001-copy-1", "expected_version": 0}
                     assert client.post(urls[index] + "/commands", json=command).status_code == 503
 
                 stop(branches[2])

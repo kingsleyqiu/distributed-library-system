@@ -9,7 +9,7 @@ other responsibilities remain with the following owners.
 | Qian Qiu / Kingsley | Branch REST API, search, caches | Shared catalog models, replaceable storage client, cache metadata |
 | Aryan Kumar | Leader election, terms, failure detection, failover testing | Storage service and leader-discovery contract |
 | Logan Yee | Replication, majority commit, catch-up, persistence | Committed catalog snapshots, durable revision, command results |
-| Titobi Odufuye | Borrow, return, renew, holds, version checks, request IDs | Reserved command envelope, authoritative atomic write path |
+| Titobi Odufuye | Borrow, return, renew, holds, version checks, request IDs | Implemented shared circulation handlers, checked writes, and durable request results in both storage modes |
 | Mohit Gajula | Login, sample books, dashboard, Compose, demo setup | Authentication boundary, node status, runtime configuration |
 
 The initial sample books and Compose configuration are shared scaffolding for
@@ -33,11 +33,13 @@ This phase can demonstrate:
   with heartbeat failure detection, terms, and check-quorum (failover in about
   2 s; see `scripts/measure_failover.py`).
 
-It cannot yet demonstrate:
+Circulation tests also demonstrate concurrent lending safety, FIFO hold
+priority, renewal restrictions, durable request deduplication, and retry safety
+through replica failover. The agreed API and business defaults are documented
+in [Circulation commands](INTERFACES.md#circulation-commands).
 
-- concurrent lending safety. The write path commits commands, but no
-  circulation handlers are registered yet (see "Command handlers").
-- account permissions.
+It cannot yet demonstrate authenticated account permissions. Actor IDs remain
+client supplied until the login module is integrated.
 
 Docker Compose is supplied as the intended container configuration. The initial
 accepted verification uses native Python processes because Docker is not

@@ -1,7 +1,7 @@
 """Deterministic catalog state machine driven by committed log entries.
 
-Business operations (borrow, return, renew, hold, ...) are *not* implemented
-here. Their owners register a handler per operation::
+Business operations are registered by the service; the shared circulation
+handlers live in ``library_system.circulation``::
 
     def borrow(snapshot, command, context) -> CommandOutcome: ...
     machine.register("borrow", borrow)

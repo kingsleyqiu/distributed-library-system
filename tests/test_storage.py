@@ -94,7 +94,7 @@ def test_empty_seed_directory_is_not_silently_used(tmp_path):
         load_books(tmp_path)
 
 
-def test_http_contract_and_unimplemented_mutations(tmp_path):
+def test_http_contract_and_circulation(tmp_path):
     app = create_app(tmp_path / "catalog.sqlite3")
     with TestClient(app) as client:
         assert client.get("/health").json() == {"status": "ok", "mode": "single-node-stand-in"}
@@ -103,7 +103,9 @@ def test_http_contract_and_unimplemented_mutations(tmp_path):
         assert len(snapshot.books) == 20
         command = {"request_id": "request-1", "operation": "borrow", "actor_id": "patron-1", "book_id": "book-001", "copy_id": "book-001-copy-1", "expected_version": 0}
         response = client.post("/internal/commands", json=command)
-        assert response.status_code == 501
-        assert app.state.catalog.version().revision == 1
+        assert response.status_code == 200 and response.json()["ok"]
+        assert response.json()["request_id"] == command["request_id"]
+        assert app.state.catalog.version().revision == 2
+        assert client.post("/internal/commands", json={**command, "operation": "add_book"}).status_code == 501
         assert client.post("/internal/commands", json={**command, "expected_version": -1}).status_code == 422
         assert client.post("/internal/commands", json={**command, "unexpected": "field"}).status_code == 422

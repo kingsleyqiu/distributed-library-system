@@ -4,7 +4,8 @@ Everything a replica must keep across a crash lives here:
 
 * ``meta``  - the current term and the vote cast in it (Raft's persistent state);
 * ``log``   - every log entry, keyed by index;
-* ``state`` - the applied catalog, its revision, and ``last_applied``.
+* ``state`` - the applied catalog, its revision, and ``last_applied``;
+* ``command_results`` - original command payloads and outcomes for safe retries.
 
 Every method is one SQLite transaction with ``synchronous=FULL`` in WAL mode,
 so a change is on disk before the caller acknowledges it to anyone else.
@@ -19,7 +20,9 @@ import json
 from pathlib import Path
 import sqlite3
 
-from library_system.models import Book, CatalogSnapshot, LogEntry
+from library_system.command_store import apply_entry, initialize_requests
+from library_system.consensus.state_machine import CatalogStateMachine
+from library_system.models import Book, CatalogSnapshot, CommandResult, LogEntry
 from library_system.storage import DEFAULT_BOOKS_DIR, load_books
 
 
@@ -66,6 +69,7 @@ class RaftStore:
         with closing_connection(self.db_path) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
         with self._transaction() as connection:
+            initialize_requests(connection)
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS meta ("
                 "id INTEGER PRIMARY KEY CHECK (id = 1), "
@@ -161,6 +165,21 @@ class RaftStore:
             ).rowcount
             if updated != 1:
                 raise RuntimeError(f"Entries must be applied in order; cannot apply {index}")
+
+    def apply_committed(
+        self, entry: LogEntry, snapshot: CatalogSnapshot, machine: CatalogStateMachine,
+    ) -> tuple[CatalogSnapshot, CommandResult]:
+        """Persist the catalog, request result, and apply index atomically."""
+        with self._transaction() as connection:
+            updated, result = apply_entry(connection, machine, snapshot, entry)
+            changed = connection.execute(
+                "UPDATE state SET last_applied = ?, revision = ?, books = ? "
+                "WHERE id = 1 AND last_applied = ?",
+                (entry.index, updated.revision, _books_json(updated.books), entry.index - 1),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError(f"Entries must be applied in order; cannot apply {entry.index}")
+        return updated, result
 
     def entries(self, low: int, high: int | None = None) -> tuple[LogEntry, ...]:
         """Entries with ``low <= index <= high`` (``high`` defaults to the end)."""

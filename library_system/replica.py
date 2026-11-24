@@ -39,6 +39,7 @@ from library_system.models import (
     RequestVoteResponse,
 )
 from library_system.storage import DEFAULT_BOOKS_DIR
+from library_system.circulation import create_circulation_machine
 
 
 DEFAULT_CLUSTER = (
@@ -113,7 +114,7 @@ def create_app(
             f"({read_lease}s) plus rpc_timeout ({rpc_timeout}s)"
         )
     peer_urls = {peer: url for peer, url in cluster.items() if peer != node_id}
-    machine = state_machine or CatalogStateMachine()
+    machine = state_machine or create_circulation_machine()
     db_path = db_path or f"var/replica-{node_id}.sqlite3"
 
     @asynccontextmanager

@@ -5,11 +5,13 @@ import json
 import os
 import sqlite3
 from contextlib import asynccontextmanager, closing
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import Field
 
+from library_system.command_store import apply_entry, initialize_requests
 from library_system.models import (
     Book,
     BookCopy,
@@ -17,7 +19,9 @@ from library_system.models import (
     CatalogSnapshot,
     CatalogVersion,
     CommandEnvelope,
+    CommandResult,
     Contract,
+    LogEntry,
 )
 
 
@@ -68,6 +72,7 @@ class CatalogRepository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
+            initialize_requests(connection)
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS catalog ("
                 "id INTEGER PRIMARY KEY CHECK (id = 1), "
@@ -117,6 +122,31 @@ class CatalogRepository:
             )
         return snapshot
 
+    def execute(self, command: CommandEnvelope) -> CommandResult:
+        # Import lazily: consensus persistence also imports the seed loader.
+        from library_system.circulation import create_circulation_machine
+
+        machine = create_circulation_machine()
+        if not machine.supports(command.operation):
+            raise NotImplementedError(f"Operation {command.operation!r} is not implemented yet")
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            snapshot = self._snapshot(
+                connection.execute("SELECT revision, books FROM catalog WHERE id = 1").fetchone()
+            )
+            (count,) = connection.execute("SELECT COUNT(*) FROM command_results").fetchone()
+            entry = LogEntry(
+                index=count + 1, term=1, kind="command",
+                timestamp=datetime.now(timezone.utc), command=command,
+            )
+            updated, result = apply_entry(connection, machine, snapshot, entry)
+            if updated != snapshot:
+                connection.execute(
+                    "UPDATE catalog SET revision = ?, books = ? WHERE id = 1",
+                    (updated.revision, json.dumps([book.model_dump(mode="json") for book in updated.books])),
+                )
+        return result
+
 
 def create_app(
     db_path: str | Path | None = None,
@@ -144,9 +174,12 @@ def create_app(
     def catalog_snapshot():
         return repository.snapshot()
 
-    @app.post("/internal/commands", status_code=501)
+    @app.post("/internal/commands", response_model=CommandResult)
     def commands(command: CommandEnvelope):
-        raise HTTPException(501, "Commands are not implemented by the storage stand-in")
+        try:
+            return repository.execute(command)
+        except NotImplementedError as error:
+            raise HTTPException(501, str(error)) from error
 
     return app
 

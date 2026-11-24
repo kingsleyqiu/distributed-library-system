@@ -1,4 +1,4 @@
-"""HTTP contracts shared by branch nodes and the future Raft storage cluster."""
+"""HTTP contracts shared by branch nodes and both storage backends."""
 
 from datetime import date, datetime
 from typing import Any, Literal, Self
@@ -19,12 +19,24 @@ class BookCopy(Contract):
     available: bool
     due_date: date | None = None
     version: int = Field(ge=0)
+    borrower_id: str | None = Field(default=None, min_length=1, max_length=128)
+    renewals: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def available_copy_has_no_due_date(self) -> Self:
         if self.available and self.due_date is not None:
             raise ValueError("An available copy cannot have a due date")
+        if self.available and (self.borrower_id is not None or self.renewals):
+            raise ValueError("An available copy cannot have a borrower or renewals")
+        if self.borrower_id is not None and self.due_date is None:
+            raise ValueError("A loan must have a due date")
         return self
+
+
+class Hold(Contract):
+    hold_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=128)
+    created_at: datetime
 
 
 class Book(Contract):
@@ -32,6 +44,15 @@ class Book(Contract):
     title: str = Field(min_length=1, max_length=300)
     author: str = Field(min_length=1, max_length=300)
     copies: tuple[BookCopy, ...]
+    holds: tuple[Hold, ...] = ()
+
+    @model_validator(mode="after")
+    def unique_holds(self) -> Self:
+        if len({hold.actor_id for hold in self.holds}) != len(self.holds):
+            raise ValueError("A patron can have only one hold per title")
+        if len({hold.hold_id for hold in self.holds}) != len(self.holds):
+            raise ValueError("Hold IDs must be unique within a title")
+        return self
 
 
 class CatalogVersion(Contract):
@@ -71,14 +92,26 @@ class BookDetailResult(Contract):
 
 
 class CommandEnvelope(Contract):
-    """Future mutation request; this phase does not execute commands."""
+    """Client-generated request IDs identify one immutable command."""
 
     request_id: str = Field(min_length=1, max_length=128)
     operation: Literal["borrow", "return", "renew", "hold", "add_book", "remove_book"]
     actor_id: str = Field(min_length=1, max_length=128)
     book_id: str = Field(min_length=1, max_length=128)
     copy_id: str | None = Field(default=None, min_length=1, max_length=128)
-    expected_version: int | None = Field(default=None, ge=0)
+    expected_version: int | None = Field(default=None, ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def operation_fields(self) -> Self:
+        for value in (self.request_id, self.actor_id, self.book_id, self.copy_id):
+            if value is not None and not value.strip():
+                raise ValueError("Identifiers cannot be blank")
+        if self.operation in {"borrow", "return", "renew"}:
+            if self.copy_id is None or self.expected_version is None:
+                raise ValueError("Borrow, return, and renew require copy_id and expected_version")
+        if self.operation == "hold" and (self.copy_id is not None or self.expected_version is not None):
+            raise ValueError("Holds are for a title; omit copy_id and expected_version")
+        return self
 
 
 # --- Replicated storage (log replication, majority commit) -------------------
@@ -161,6 +194,7 @@ class CommandResult(Contract):
     ok: bool
     result: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+    request_id: str | None = None
 
 
 class ReplaceCatalogRequest(Contract):

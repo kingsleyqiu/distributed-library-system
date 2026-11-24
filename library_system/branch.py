@@ -9,7 +9,7 @@ import os
 from time import monotonic
 from typing import get_args
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 import httpx
 
 from library_system.models import (
@@ -20,6 +20,7 @@ from library_system.models import (
     CatalogSnapshot,
     CatalogVersion,
     CommandEnvelope,
+    CommandResult,
 )
 
 
@@ -172,12 +173,41 @@ def create_app(
                 return BookDetailResult(book=book, cache=metadata)
         raise HTTPException(404, "Book not found")
 
-    @app.post("/commands", status_code=501)
+    @app.post("/commands", response_model=CommandResult)
     async def commands(command: CommandEnvelope):
         cache = app.state.catalog_cache
         if cache.stale:
             raise HTTPException(503, "Storage unavailable; mutations are not accepted")
-        raise HTTPException(501, "Command interface reserved for the circulation/auth teams")
+        try:
+            response = await cache.client.post(
+                "/internal/commands", json=command.model_dump(mode="json"),
+                timeout=max(storage_timeout, 10.0),
+            )
+        except httpx.HTTPError as error:
+            cache.last_error = str(error) or "Command forwarding failed"
+            raise HTTPException(
+                503, "Outcome unknown; retry the same command with the same request_id",
+            ) from error
+        if response.status_code != 200:
+            if response.status_code >= 500 and response.status_code != 501:
+                cache.last_error = "Storage could not confirm the command"
+            return Response(
+                response.content, status_code=response.status_code,
+                media_type=response.headers.get("content-type"),
+            )
+        try:
+            result = CommandResult.model_validate(response.json())
+            if result.request_id != command.request_id:
+                raise ValueError("Storage returned a different request_id")
+        except ValueError as error:
+            cache.last_error = "Storage returned an invalid command result"
+            raise HTTPException(
+                503, "Outcome unknown; retry the same command with the same request_id",
+            ) from error
+        # Refresh authoritative state even after conflicts. A failed refresh
+        # must never turn a committed success into a failed loan.
+        await cache.refresh()
+        return result
 
     return app
 

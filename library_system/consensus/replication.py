@@ -483,8 +483,9 @@ class RaftNode:
         while self.last_applied < self.commit_index:
             entry = self.log[self.last_applied]
             assert self.snapshot is not None
-            snapshot, result = self.state_machine.apply(self.snapshot, entry)
-            await asyncio.to_thread(self.store.save_applied, entry.index, snapshot)
+            snapshot, result = await asyncio.to_thread(
+                self.store.apply_committed, entry, self.snapshot, self.state_machine,
+            )
             self.snapshot = snapshot
             self.last_applied = entry.index
             pending = self._pending.pop(entry.index, None)

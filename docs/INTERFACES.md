@@ -1,4 +1,4 @@
-# Shared interfaces: first implementation
+# Shared interfaces
 
 This phase contains three branch APIs and two interchangeable storage backends:
 
@@ -37,7 +37,10 @@ bind to `127.0.0.1`, and the native runner also binds only to loopback.
 | `branch_id` | Current copy location: `branch-1`, `branch-2`, or `branch-3` |
 | `available` | Whether the copy is currently available to borrow |
 | `due_date` | ISO date or `null`; an available copy has no due date |
-| `version` | Nonnegative version of a copy, reserved for checked writes |
+| `version` | Nonnegative copy version, incremented on borrow, return, or renew |
+| `borrower_id` | Current patron ID or `null`; legacy snapshots default to `null` |
+| `renewals` | Renewals on the current loan; defaults to zero and resets on return |
+| `holds` | Title-level FIFO array of `{hold_id, actor_id, created_at}`; defaults to empty |
 | `revision` | Nonnegative, durable, monotonically increasing catalog revision |
 
 Snapshot example:
@@ -67,8 +70,9 @@ Snapshot example:
 Book IDs must be unique in a snapshot, and copy IDs must be unique across the
 whole snapshot. Branches validate snapshots before installing them atomically.
 The catalog revision and each copy's version serve different purposes: the
-revision detects catalog changes; a copy version is for future concurrency
-checks on that specific copy.
+revision detects catalog changes; a copy version checks concurrent writes on
+that specific copy. Hold changes advance the catalog revision without changing
+copy versions. Older catalogs without the new circulation fields still load.
 
 ## Storage read endpoints
 
@@ -153,13 +157,15 @@ branch can serve old searches; this does not authorize offline writes.
 This first phase uses **version polling**, explicitly accepted for development.
 It does not implement the proposal's active numbered update notifications.
 Normal cached searches can lag behind storage, and an outage can keep them old
-for longer. Availability shown in search is advisory; future lending must
-check and commit against authoritative storage.
+for longer. Availability shown in search is advisory; lending checks and commits against
+authoritative storage. `available` describes whether a copy is on loan; a hold
+queue may still restrict who can borrow an available copy.
 
-## Reserved writes: no implementation in this phase
+## Circulation commands
 
-`POST /commands` on a branch and `POST /internal/commands` on storage reserve
-the future write path. The shared `CommandEnvelope` names the common fields:
+`POST /commands` on a branch forwards to `POST /internal/commands` on storage.
+Both the stand-in and the replica service register the same deterministic
+handlers from `library_system/circulation.py`.
 
 ```json
 {
@@ -167,27 +173,123 @@ the future write path. The shared `CommandEnvelope` names the common fields:
   "operation": "borrow",
   "actor_id": "patron-demo-id",
   "book_id": "book-001",
-  "copy_id": "copy-001",
+  "copy_id": "book-001-copy-1",
   "expected_version": 0
 }
 ```
 
-Operations are `borrow`, `return`, `renew`, `hold`, `add_book`, and
-`remove_book`. The envelope is scaffolding, not a complete business schema:
-for example, staff book metadata and an authenticated actor must still be
-specified by the responsible teammates. No operation is executed yet: the
-replicated storage can commit commands, but no operation handlers are
-registered, so valid requests still return HTTP 501 (see
-[Command handlers](#command-handlers-circulation-team)). A branch without
-usable storage synchronization returns HTTP 503. Validation errors return
-HTTP 422. No loan, hold, login, or staff operation should be represented as
-successfully completed.
+`request_id`, `actor_id`, and `book_id` are required, nonblank strings of at
+most 128 characters. Borrow, return, and renew also require a `copy_id` belonging
+to the title and an integer `expected_version >= 0` (booleans and strings are
+rejected). Hold commands apply to a title and must omit copy and version fields.
+`add_book` and `remove_book` remain reserved and return HTTP 501.
 
-Before implementing writes, agree on authentication, operation-specific input
-and output schemas, loan durations, renew limits, hold ordering, and removal
-rules. The eventual leader must atomically check copy versions, deduplicate
-`request_id`, and return success only after the replicated commit succeeds.
-Branches must never treat an optimistic cache update as an authoritative loan.
+### Business rules
+
+- **Borrow:** the requested copy must be available, its version must match, and
+  the patron must not already have a copy of the title on loan. The patron at
+  the front of the hold queue has exclusive priority while the queue is
+  nonempty. Borrowing consumes that patron's hold, records their ID, sets the
+  due date to the storage-assigned UTC date plus **14 days**, and increments the
+  copy version once.
+- **Return:** the version and current borrower must match. Clears the borrower,
+  due date, and renewal count; marks the copy available and increments its
+  version. Holds remain queued. A return does not automatically create a loan.
+- **Renew:** the version and borrower must match, no holds may be pending, and
+  the loan must not be overdue (a renewal on its due date is allowed). At most
+  **two renewals** per loan, each adding **14 days** to its existing due date
+  and incrementing its version.
+- **Hold:** appends one hold per patron per title in committed command order.
+  The title must have at least one copy, and a current borrower cannot also
+  hold that title. Holds may be placed even if a copy is available. `hold_id`
+  equals the request ID; `created_at` uses the storage-assigned timestamp. The
+  result includes the one-based queue position at placement time. Holds do not
+  currently expire or support cancellation.
+
+Copy versions are checked atomically with mutation, so two different requests
+using the same version cannot both change the copy. Every successful circulation
+command advances the catalog revision once; rejected commands and exact retries
+leave it unchanged. Queue order is global across all three branches.
+
+### Results and errors
+
+HTTP 200 means storage has a committed result, which can be a success or a
+business refusal. Always inspect `ok`:
+
+```json
+{
+  "index": 2,
+  "term": 1,
+  "revision": 2,
+  "ok": true,
+  "request_id": "client-generated-unique-request-id",
+  "result": {
+    "operation": "borrow",
+    "book_id": "book-001",
+    "copy": {
+      "copy_id": "book-001-copy-1",
+      "branch_id": "branch-1",
+      "available": false,
+      "due_date": "2026-12-08",
+      "version": 1,
+      "borrower_id": "patron-demo-id",
+      "renewals": 0
+    }
+  },
+  "error": null
+}
+```
+
+The single-node backend uses a local request sequence for `index` and `term: 1`;
+replicated mode uses the original committed log index and term. A hold result
+contains `operation`, `book_id`, `hold`, and `position` instead of `copy`.
+
+Business refusals return `ok: false`, `result: {}`, and a stable error string:
+
+| Error | Meaning |
+| --- | --- |
+| `book_not_found`, `copy_not_found` | The requested title or copy in that title does not exist |
+| `version_conflict` | Read the latest copy version and submit a new command with a new request ID |
+| `copy_unavailable`, `copy_not_borrowed` | Copy state does not permit the requested operation |
+| `not_borrower` | Only the recorded borrower may return or renew |
+| `already_borrowed` | Patron already has a copy of this title on loan |
+| `already_on_hold` | Patron already has a pending hold for this title |
+| `hold_queue_priority` | Another patron is first in the queue |
+| `holds_pending` | A waiting patron prevents renewal |
+| `renewal_limit`, `loan_overdue` | The loan cannot be renewed |
+| `no_copies` | The title has no copies to hold |
+| `request_id_conflict` | This ID was already used with a different payload |
+
+Malformed input returns HTTP 422 before mutation. Unsupported staff operations
+return 501. A stale/disconnected branch returns 503 without making an offline
+change. After forwarding, a timeout, malformed response, or 503 can mean the
+outcome is unknown; retry with the same request ID and payload.
+
+### Request IDs and durability
+
+Clients generate a unique ID for each logical command (a UUID is suitable).
+The first committed outcome, including a business refusal, and its complete
+payload are saved in SQLite in the **same transaction** as the catalog and,
+on replicas, `last_applied`. Exact retries return the original `CommandResult`,
+including its original revision/index/term, even if the catalog has since
+changed. Reusing an ID with a changed operation, actor, title, copy, or version
+returns `request_id_conflict` without replacing the original outcome.
+
+Every replica deduplicates while applying the committed log. An unconfirmed
+entry and its retry may both enter the log, but change circulation state only
+once. Request results survive restarts, catch-up, and leader changes. Request
+history is retained without pruning at this demo's scale. HTTP validation,
+unsupported-operation, and pre-forwarding failures do not reserve an ID.
+
+Branches validate storage responses and refresh from storage after receiving a
+result. A failed cache refresh marks the cache stale but preserves a confirmed
+command result. Branches never update a cached copy optimistically.
+
+Authentication is still pending: `actor_id` is a claimed identity supplied by
+the client. Borrower checks enforce loan ownership against that value; they do
+not authenticate it. The future login layer must bind it to a verified patron.
+Catalog responses currently include borrower IDs and hold queues for this local
+demo; access control belongs to that integration.
 
 ## Replicated storage
 
@@ -229,13 +331,13 @@ all replicas and never moves backwards across leader changes.
    and replicates it.
 3. Once the entry is stored on a majority (2 of 3) and committed, it is applied
    on every replica. The response is a `CommandResult` `{index, term, revision,
-   ok, result, error}`. `ok: false` means the handler deterministically
+   ok, result, error, request_id}`. `ok: false` means the handler deterministically
    rejected the command; the catalog is unchanged.
 4. If commit is not confirmed within `RAFT_COMMIT_TIMEOUT_SECONDS` (default 5),
    or the leader loses leadership first: **503, outcome unknown**. The entry
    may still commit later, so clients must retry with the **same**
-   `request_id`, and deduplication by `request_id` belongs to the command
-   handlers.
+   `request_id`. The transactional apply layer deduplicates commands before
+   invoking their handlers.
 
 `POST /internal/raft/test/replace_catalog` `{"books": [...]}` replicates a
 whole-catalog replacement. It exists only when `RAFT_ENABLE_TEST_WRITES=1`
@@ -299,8 +401,9 @@ processes (about 1.9 s on average with the defaults).
 
 ### Command handlers (circulation team)
 
-Register one handler per operation on the `CatalogStateMachine` passed to
-`create_app(state_machine=...)`:
+The default replica service installs borrow, return, renew, and hold handlers.
+To customize operations, register handlers on the `CatalogStateMachine` passed
+to `create_app(state_machine=...)` (this replaces the default machine):
 
 ```python
 def borrow(snapshot, command, context) -> CommandOutcome:
@@ -314,7 +417,10 @@ Handlers run on **every replica**, in log order, and must be deterministic:
 - No randomness and no I/O.
 - Return `books=None` to leave the catalog unchanged.
 
-All replicas must run the same handler code.
+All replicas must run the same handler code and business constants. Restart
+all replicas with the updated code before submitting circulation commands.
+Request deduplication is performed by persistence, outside the handlers, so
+handlers remain pure functions of their snapshot, command, and context.
 
 ### Configuration
 

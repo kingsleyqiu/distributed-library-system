@@ -96,6 +96,8 @@ def test_invalid_future_command_envelopes_are_rejected(changes):
         "operation": "borrow",
         "actor_id": "patron-1",
         "book_id": "book-1",
+        "copy_id": "copy-1",
+        "expected_version": 0,
         **changes,
     }
     with pytest.raises(ValidationError):

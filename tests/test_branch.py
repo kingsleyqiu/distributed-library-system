@@ -60,8 +60,10 @@ class FakeStorage:
         self.calls = Counter()
 
     def __call__(self, request):
-        assert request.method == "GET"
         path = request.url.path
+        if request.method == "POST" and path == "/internal/commands":
+            return httpx.Response(501, json={"detail": "Operation is not implemented yet"})
+        assert request.method == "GET"
         self.calls[path] += 1
         if not self.online:
             raise httpx.ConnectError("Storage disconnected", request=request)
@@ -207,10 +209,10 @@ def test_restarted_branch_repopulates_its_cache_from_storage(storage):
         assert result["total"] == 0
 
 
-def test_reserved_commands_never_claim_to_execute_mutations(client, storage):
+def test_unimplemented_commands_and_offline_writes_are_refused(client, storage):
     command = {
-        "request_id": "request-1", "operation": "borrow", "actor_id": "patron-1",
-        "book_id": "book-1", "copy_id": "copy-1", "expected_version": 0,
+        "request_id": "request-1", "operation": "add_book", "actor_id": "patron-1",
+        "book_id": "book-1",
     }
     assert client.post("/commands", json=command).status_code == 501
     assert client.get("/books/book-1").json()["book"]["copies"][0]["available"] is True

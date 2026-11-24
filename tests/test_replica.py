@@ -60,7 +60,7 @@ def test_single_replica_serves_reads_and_replicated_writes(tmp_path):
 
         # Unimplemented operations are refused before anything is appended.
         before = client.get("/internal/raft/status").json()["last_log_index"]
-        assert client.post("/internal/commands", json=COMMAND).status_code == 501
+        assert client.post("/internal/commands", json={**COMMAND, "operation": "add_book"}).status_code == 501
         assert client.get("/internal/raft/status").json()["last_log_index"] == before
         assert client.post("/internal/commands", json={**COMMAND, "expected_version": -1}).status_code == 422
 
