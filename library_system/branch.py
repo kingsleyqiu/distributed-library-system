@@ -9,9 +9,19 @@ import os
 from time import monotonic
 from typing import get_args
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 import httpx
 
+from library_system.auth import (
+    DEFAULT_AUTH_SECRET,
+    LoginRequest,
+    LoginResponse,
+    UserIdentity,
+    authenticate_user,
+    issue_token,
+    verify_token,
+)
+from library_system.lamport import EventLog, LAMPORT_HEADER, LamportClock, parse_lamport_header
 from library_system.models import (
     BookDetailResult,
     BookSearchResult,
@@ -100,6 +110,8 @@ def create_app(
     sync_interval: float = 1.0,
     storage_timeout: float = 1.0,
     transport: httpx.AsyncBaseTransport | None = None,
+    require_auth: bool = False,
+    auth_secret: str = DEFAULT_AUTH_SECRET,
 ) -> FastAPI:
     if branch_id not in get_args(BranchId):
         raise ValueError("BRANCH_ID must be branch-1, branch-2, or branch-3")
@@ -127,6 +139,21 @@ def create_app(
                     await polling
 
     app = FastAPI(title=f"Library {branch_id}", lifespan=lifespan)
+    clock = LamportClock()
+    events = EventLog(branch_id, clock)
+    app.state.clock = clock
+    app.state.events = events
+
+    def _extract_user(authorization: str | None) -> UserIdentity | None:
+        if not authorization:
+            return None
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not token:
+            raise HTTPException(401, "Expected Authorization: Bearer <token>")
+        try:
+            return verify_token(token, secret=auth_secret)
+        except ValueError as error:
+            raise HTTPException(401, str(error)) from error
 
     @app.get("/health")
     async def health():
@@ -139,6 +166,31 @@ def create_app(
             "revision": cache.snapshot.revision if cache.snapshot is not None else None,
             "last_synced_at": cache.last_synced_at,
             "storage_available": not cache.stale,
+        }
+
+    @app.post("/auth/login", response_model=LoginResponse)
+    async def login(credentials: LoginRequest):
+        user = authenticate_user(credentials.user_id, credentials.password)
+        if user is None:
+            events.record("login_failed", f"Failed login for {credentials.user_id}")
+            raise HTTPException(401, "Invalid user_id or password")
+        token = issue_token(user, secret=auth_secret)
+        events.record("login", f"{user.role} {user.user_id} logged in")
+        return LoginResponse(access_token=token, user=user)
+
+    @app.get("/auth/me", response_model=UserIdentity)
+    async def me(authorization: str | None = Header(default=None)):
+        user = _extract_user(authorization)
+        if user is None:
+            raise HTTPException(401, "Authentication required")
+        return user
+
+    @app.get("/internal/events")
+    async def internal_events(limit: int = Query(default=100, ge=1, le=200)):
+        return {
+            "node_id": branch_id,
+            "lamport_clock": clock.value,
+            "events": events.snapshot(limit),
         }
 
     @app.get("/books", response_model=BookSearchResult)
@@ -174,13 +226,39 @@ def create_app(
         raise HTTPException(404, "Book not found")
 
     @app.post("/commands", response_model=CommandResult)
-    async def commands(command: CommandEnvelope):
+    async def commands(
+        command: CommandEnvelope,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
+        user = _extract_user(authorization)
+        if require_auth and user is None:
+            raise HTTPException(401, "Authentication required")
+        if user is not None:
+            if command.operation in {"add_book", "remove_book"} and user.role != "staff":
+                raise HTTPException(403, "Only staff can add or remove books")
+            if user.role == "patron" and command.actor_id != user.user_id:
+                raise HTTPException(403, "Patrons can only submit commands for themselves")
+
+        incoming_clock = parse_lamport_header(request.headers.get(LAMPORT_HEADER))
+        clock.receive(incoming_clock)
+
         cache = app.state.catalog_cache
         if cache.stale:
+            events.record("command_refused", f"Refused {command.operation} on {command.book_id} (storage unreachable)")
             raise HTTPException(503, "Storage unavailable; mutations are not accepted")
+
+        send_ts = clock.tick()
+        events.record(
+            "command_forwarded",
+            f"{command.actor_id} -> {command.operation} {command.book_id} ({command.copy_id or 'title'})",
+            lamport_time=send_ts,
+        )
         try:
             response = await cache.client.post(
-                "/internal/commands", json=command.model_dump(mode="json"),
+                "/internal/commands",
+                json=command.model_dump(mode="json"),
+                headers={LAMPORT_HEADER: str(send_ts)},
                 timeout=max(storage_timeout, 10.0),
             )
         except httpx.HTTPError as error:
@@ -188,6 +266,8 @@ def create_app(
             raise HTTPException(
                 503, "Outcome unknown; retry the same command with the same request_id",
             ) from error
+
+        reply_ts = clock.receive(parse_lamport_header(response.headers.get(LAMPORT_HEADER)))
         if response.status_code != 200:
             if response.status_code >= 500 and response.status_code != 501:
                 cache.last_error = "Storage could not confirm the command"
@@ -204,6 +284,13 @@ def create_app(
             raise HTTPException(
                 503, "Outcome unknown; retry the same command with the same request_id",
             ) from error
+
+        outcome = "committed" if result.ok else f"rejected ({result.error})"
+        events.record(
+            "command_result",
+            f"{command.operation} {command.book_id}: {outcome} (rev {result.revision})",
+            lamport_time=reply_ts,
+        )
         # Refresh authoritative state even after conflicts. A failed refresh
         # must never turn a committed success into a failed loan.
         await cache.refresh()
@@ -217,4 +304,6 @@ app = create_app(
     storage_url=os.getenv("STORAGE_URL", "http://127.0.0.1:8100"),
     sync_interval=float(os.getenv("SYNC_INTERVAL_SECONDS", "1")),
     storage_timeout=float(os.getenv("STORAGE_TIMEOUT_SECONDS", "1")),
+    require_auth=os.getenv("REQUIRE_AUTH", "0") == "1",
+    auth_secret=os.getenv("AUTH_SECRET", DEFAULT_AUTH_SECRET),
 )

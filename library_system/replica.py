@@ -13,9 +13,10 @@ import math
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 import httpx
 
+from library_system.circulation import create_circulation_machine
 from library_system.consensus import (
     CatalogStateMachine,
     CommitUnknownError,
@@ -26,6 +27,7 @@ from library_system.consensus import (
     RaftNode,
     RaftStore,
 )
+from library_system.lamport import EventLog, LAMPORT_HEADER, LamportClock, parse_lamport_header
 from library_system.models import (
     AppendEntriesRequest,
     AppendEntriesResponse,
@@ -39,7 +41,6 @@ from library_system.models import (
     RequestVoteResponse,
 )
 from library_system.storage import DEFAULT_BOOKS_DIR
-from library_system.circulation import create_circulation_machine
 
 
 DEFAULT_CLUSTER = (
@@ -149,6 +150,10 @@ def create_app(
                 await transport.aclose()
 
     app = FastAPI(title=f"Library catalog replica {node_id}", lifespan=lifespan)
+    clock = LamportClock()
+    events = EventLog(node_id, clock)
+    app.state.clock = clock
+    app.state.events = events
 
     async def forward(request: Request, timeout: float, body: dict | None = None) -> Response:
         """Relay a request to the leader (one hop only)."""
@@ -161,7 +166,7 @@ def create_app(
                 request.method,
                 peer_urls[leader] + request.url.path,
                 json=body,
-                headers={FORWARDED_HEADER: node_id},
+                headers={FORWARDED_HEADER: node_id, LAMPORT_HEADER: str(clock.tick())},
                 timeout=timeout,
             )
         except httpx.HTTPError as error:
@@ -218,30 +223,67 @@ def create_app(
         return await read_or_forward(request)
 
     @app.post("/internal/commands", response_model=CommandResult)
-    async def commands(command: CommandEnvelope, request: Request):
+    async def commands(command: CommandEnvelope, request: Request, response: Response):
         if not machine.supports(command.operation):
             raise HTTPException(501, f"Operation {command.operation!r} is not implemented yet")
+        recv_ts = clock.receive(parse_lamport_header(request.headers.get(LAMPORT_HEADER)))
         node: RaftNode = app.state.node
-        return await submit_or_forward(
+        events.record(
+            "command_received",
+            f"[{node.role}] {command.operation} {command.book_id} by {command.actor_id}",
+            lamport_time=recv_ts,
+        )
+        result = await submit_or_forward(
             request,
             command.model_dump(mode="json"),
             lambda: node.submit("command", command=command),
         )
+        done_ts = clock.tick()
+        if isinstance(result, CommandResult):
+            outcome = "committed" if result.ok else f"rejected ({result.error})"
+            events.record(
+                "command_committed",
+                f"idx={result.index} term={result.term} {command.operation} {command.book_id}: {outcome}",
+                lamport_time=done_ts,
+            )
+            response.headers[LAMPORT_HEADER] = str(done_ts)
+        else:
+            result.headers[LAMPORT_HEADER] = str(done_ts)
+        return result
 
     @app.post("/internal/raft/append_entries", response_model=AppendEntriesResponse)
     async def append_entries(append: AppendEntriesRequest):
         try:
-            return await app.state.node.handle_append_entries(append)
+            result = await app.state.node.handle_append_entries(append)
         except RuntimeError as error:
             raise HTTPException(409, str(error))
+        if append.entries:
+            events.record(
+                "append_entries",
+                f"leader={append.leader_id} term={append.term} entries={len(append.entries)} ok={result.success}",
+            )
+        return result
 
     @app.post("/internal/raft/request_vote", response_model=RequestVoteResponse)
     async def request_vote(vote: RequestVoteRequest):
-        return await app.state.leadership.handle_request_vote(vote)
+        result = await app.state.leadership.handle_request_vote(vote)
+        events.record(
+            "request_vote",
+            f"candidate={vote.candidate_id} term={vote.term} granted={result.vote_granted}",
+        )
+        return result
 
     @app.get("/internal/raft/status", response_model=NodeStatus)
     def raft_status():
         return app.state.node.status()
+
+    @app.get("/internal/events")
+    def internal_events(limit: int = Query(default=100, ge=1, le=200)):
+        return {
+            "node_id": node_id,
+            "lamport_clock": clock.value,
+            "events": events.snapshot(limit),
+        }
 
     @app.post("/internal/raft/promote", response_model=NodeStatus)
     async def promote():
@@ -250,6 +292,7 @@ def create_app(
         status = await app.state.leadership.start_election_now()
         if status.role != "leader":
             raise HTTPException(409, f"Election for term {status.term} not won (role: {status.role})")
+        events.record("leader_elected", f"{node_id} elected leader for term {status.term}")
         return status
 
     if enable_test_writes:

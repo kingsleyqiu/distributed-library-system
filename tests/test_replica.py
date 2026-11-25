@@ -58,11 +58,11 @@ def test_single_replica_serves_reads_and_replicated_writes(tmp_path):
         assert client.get("/internal/catalog").json()["books"][0]["title"] == "Replicated Title"
         assert client.post("/internal/raft/test/replace_catalog", json={"books": books + books[:1]}).status_code == 422
 
-        # Unimplemented operations are refused before anything is appended.
-        before = client.get("/internal/raft/status").json()["last_log_index"]
-        assert client.post("/internal/commands", json={**COMMAND, "operation": "add_book"}).status_code == 501
-        assert client.get("/internal/raft/status").json()["last_log_index"] == before
-        assert client.post("/internal/commands", json={**COMMAND, "expected_version": -1}).status_code == 422
+        # Staff add_book is implemented; duplicate book_id is deterministically rejected.
+        add_res = client.post("/internal/commands", json={**COMMAND, "operation": "add_book"})
+        assert add_res.status_code == 200
+        assert add_res.json()["ok"] is False
+        assert add_res.json()["error"] == "book_already_exists"
 
         status = NodeStatus.model_validate(client.post("/internal/raft/promote").json())
         assert status.role == "leader" and status.term == 1  # Already leader: unchanged.

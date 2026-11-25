@@ -4,6 +4,8 @@ Default: the single-node storage stand-in on port 8100.
 ``--replicated``: three storage replicas on ports 8101-8103 that elect their
 own leader (storage-1 is favoured in the first election), with branch-N
 reading through replica storage-N.
+``--dashboard``: also start the live web dashboard on port 8080.
+``--auth``: require bearer authentication on branch write commands.
 """
 
 import argparse
@@ -49,6 +51,8 @@ def main() -> int:
         action="store_true",
         help="with --replicated, enable the development-only catalog replace endpoint",
     )
+    parser.add_argument("--dashboard", action="store_true", help="also start the live dashboard on port 8080")
+    parser.add_argument("--auth", action="store_true", help="require bearer login on branch write commands")
     args = parser.parse_args()
 
     def stop(_signum, _frame):
@@ -63,65 +67,55 @@ def main() -> int:
             {
                 "BRANCH_ID": f"branch-{number}",
                 "STORAGE_URL": (
-                    f"http://127.0.0.1:{REPLICA_PORTS[f'storage-{number}']}"
-                    if args.replicated
-                    else "http://127.0.0.1:8100"
+                    f"http://127.0.0.1:{8100 + number}" if args.replicated else "http://127.0.0.1:8100"
                 ),
-                "SYNC_INTERVAL_SECONDS": "1",
-                "STORAGE_TIMEOUT_SECONDS": "1",
+                "SYNC_INTERVAL_SECONDS": os.getenv("SYNC_INTERVAL_SECONDS", "1"),
+                "STORAGE_TIMEOUT_SECONDS": os.getenv("STORAGE_TIMEOUT_SECONDS", "1"),
+                "REQUIRE_AUTH": "1" if args.auth else os.getenv("REQUIRE_AUTH", "0"),
             },
         )
         for number in range(1, 4)
     )
-    children: list[subprocess.Popen] = []
+    if args.dashboard:
+        services.append(("dashboard", 8080, {}))
+
+    processes: list[tuple[str, subprocess.Popen[bytes]]] = []
     try:
-        for module, port, settings in services:
-            env = os.environ.copy()
-            env.update(settings)
-            children.append(
-                subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-m",
-                        "uvicorn",
-                        f"library_system.{module}:app",
-                        "--host",
-                        "127.0.0.1",
-                        "--port",
-                        str(port),
-                    ],
-                    cwd=PROJECT_ROOT,
-                    env=env,
-                    start_new_session=os.name != "nt",
-                    creationflags=(
-                        subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-                    ),
-                )
+        for module, port, extra_env in services:
+            env = {**os.environ, **extra_env}
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "uvicorn",
+                    f"library_system.{module}:app",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+                cwd=PROJECT_ROOT,
+                env=env,
             )
-        if args.replicated:
-            print("Replicas: http://127.0.0.1:8101/docs (also 8102 and 8103)", flush=True)
-        else:
-            print("Storage: http://127.0.0.1:8100/docs", flush=True)
-        print("Branches: http://127.0.0.1:8001/docs (also 8002 and 8003)", flush=True)
-        print("Press Ctrl+C to stop all services.", flush=True)
+            processes.append((f"{module}:{port}", process))
         while True:
-            for child in children:
-                if child.poll() is not None:
-                    print("A service exited; stopping the remaining services.", file=sys.stderr)
-                    return child.returncode or 1
-            time.sleep(0.2)
+            for name, process in processes:
+                code = process.poll()
+                if code is not None:
+                    print(f"{name} exited with code {code}", file=sys.stderr)
+                    return code or 1
+            time.sleep(0.5)
     except KeyboardInterrupt:
         return 0
     finally:
-        for child in children:
-            if child.poll() is None:
-                child.terminate()
-        for child in children:
+        for _, process in processes:
+            if process.poll() is None:
+                process.terminate()
+        for _, process in processes:
             try:
-                child.wait(timeout=5)
+                process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait()
+                process.kill()
 
 
 if __name__ == "__main__":

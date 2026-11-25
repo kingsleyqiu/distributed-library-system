@@ -100,6 +100,11 @@ class CommandEnvelope(Contract):
     book_id: str = Field(min_length=1, max_length=128)
     copy_id: str | None = Field(default=None, min_length=1, max_length=128)
     expected_version: int | None = Field(default=None, ge=0, strict=True)
+    # Optional metadata used by staff add_book commands.
+    title: str | None = Field(default=None, min_length=1, max_length=300)
+    author: str | None = Field(default=None, min_length=1, max_length=300)
+    home_branch: BranchId | None = None
+    num_copies: int | None = Field(default=None, ge=1, le=50, strict=True)
 
     @model_validator(mode="after")
     def operation_fields(self) -> Self:
@@ -114,7 +119,7 @@ class CommandEnvelope(Contract):
         return self
 
 
-# --- Replicated storage (log replication, majority commit) -------------------
+# --- Replicated storage (log replication, majority commit) -----------------
 
 EntryKind = Literal["noop", "command", "replace_catalog"]
 RaftRole = Literal["follower", "candidate", "leader"]

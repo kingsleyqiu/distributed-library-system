@@ -1,11 +1,11 @@
-"""Deterministic circulation rules shared by both storage backends."""
+"""Deterministic circulation and staff catalog rules shared by both storage backends."""
 
 from datetime import timedelta
 
 from library_system.consensus.state_machine import (
     CatalogStateMachine, CommandOutcome, CommandRejected, EntryContext,
 )
-from library_system.models import Book, CatalogSnapshot, CommandEnvelope, Hold
+from library_system.models import Book, BookCopy, CatalogSnapshot, CommandEnvelope, Hold
 
 
 LOAN_DAYS = 14
@@ -23,8 +23,45 @@ def circulate(
     snapshot: CatalogSnapshot, command: CommandEnvelope, context: EntryContext,
 ) -> CommandOutcome:
     book = next((book for book in snapshot.books if book.book_id == command.book_id), None)
+
+    if command.operation == "add_book":
+        if book is not None:
+            raise CommandRejected("book_already_exists")
+        if not command.title or not command.author:
+            raise CommandRejected("missing_book_metadata")
+        branch = command.home_branch or "branch-1"
+        count = command.num_copies or 1
+        copies = tuple(
+            BookCopy(
+                copy_id=f"{command.book_id}-c{idx}",
+                branch_id=branch,
+                available=True,
+                version=0,
+            )
+            for idx in range(1, count + 1)
+        )
+        new_book = Book(
+            book_id=command.book_id,
+            title=command.title.strip(),
+            author=command.author.strip(),
+            copies=copies,
+        )
+        return CommandOutcome(
+            books=(*snapshot.books, new_book),
+            result={"operation": "add_book", "book": new_book.model_dump(mode="json")},
+        )
+
     if book is None:
         raise CommandRejected("book_not_found")
+
+    if command.operation == "remove_book":
+        if any(not item.available for item in book.copies):
+            raise CommandRejected("copies_checked_out")
+        remaining = tuple(item for item in snapshot.books if item.book_id != book.book_id)
+        return CommandOutcome(
+            books=remaining,
+            result={"operation": "remove_book", "book_id": book.book_id},
+        )
 
     if command.operation == "hold":
         if not book.copies:
@@ -96,4 +133,6 @@ def circulate(
 
 
 def create_circulation_machine() -> CatalogStateMachine:
-    return CatalogStateMachine({operation: circulate for operation in ("borrow", "return", "renew", "hold")})
+    return CatalogStateMachine(
+        {operation: circulate for operation in ("borrow", "return", "renew", "hold", "add_book", "remove_book")}
+    )
