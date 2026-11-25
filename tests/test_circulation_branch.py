@@ -61,7 +61,7 @@ def test_branch_refreshes_catalog_after_commit_and_uses_storage_for_versions(ups
         refused = second.post("/commands", json=command("bob", actor_id="bob"))
         assert refused.status_code == 200 and refused.json()["error"] == "version_conflict"
         assert second.get("/books/book-001").json()["cache"]["revision"] == 2
-        assert upstream.commands[0] == command()
+        assert upstream.commands[0] == CommandEnvelope(**command()).model_dump(mode="json")
         assert second.post("/commands", json=command()).json() == borrowed.json()
 
 

@@ -145,6 +145,8 @@ def test_restarted_follower_catches_up_from_disk_in_batches(run_cluster, tmp_pat
         assert restarted.log == c[1].log
         assert restarted.snapshot == c[1].snapshot
         assert restarted.snapshot.revision == 7
+        # The follower applies an entry before its acknowledgement reaches the leader.
+        await eventually(lambda: c[1].status().peers["storage-3"].lag == 0)
         assert c[1].status().peers["storage-3"].lag == 0
 
         on_disk = RaftStore(tmp_path / "storage-3.sqlite3").load()

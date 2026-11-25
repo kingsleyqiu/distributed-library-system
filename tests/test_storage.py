@@ -106,6 +106,17 @@ def test_http_contract_and_circulation(tmp_path):
         assert response.status_code == 200 and response.json()["ok"]
         assert response.json()["request_id"] == command["request_id"]
         assert app.state.catalog.version().revision == 2
-        assert client.post("/internal/commands", json={**command, "operation": "add_book"}).status_code == 501
+        added = client.post("/internal/commands", json={
+            "request_id": "staff-add-http-1", "operation": "add_book", "actor_id": "staff-1",
+            "book_id": "book-http-new", "title": "HTTP Catalog Sample", "author": "Test Author",
+            "home_branch": "branch-2", "num_copies": 2,
+        })
+        assert added.status_code == 200 and added.json()["ok"]
+        updated = CatalogSnapshot.model_validate(client.get("/internal/catalog").json())
+        new_book = next(book for book in updated.books if book.book_id == "book-http-new")
+        assert new_book.title == "HTTP Catalog Sample" and new_book.author == "Test Author"
+        assert len(new_book.copies) == 2
+        assert all(copy.branch_id == "branch-2" and copy.available for copy in new_book.copies)
+        assert updated.revision == 3
         assert client.post("/internal/commands", json={**command, "expected_version": -1}).status_code == 422
         assert client.post("/internal/commands", json={**command, "unexpected": "field"}).status_code == 422
