@@ -1,0 +1,3 @@
+{"book_id":"book-012","title":"Letters to a Hilltop Wind","author":"Owen Lake","branch_id":"branch-3","copies":2}
+
+Every letter on the hilltop began with a question for the wind. The answers arrived as paths through the long grass.

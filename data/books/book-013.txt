@@ -1,0 +1,3 @@
+{"book_id":"book-013","title":"The Bookbinder's Compass","author":"Mara Elm","branch_id":"branch-1","copies":2}
+
+The compass pointed toward the nearest story needing a new cover. Its owner followed it to a child carrying a notebook in the rain.
