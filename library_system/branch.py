@@ -257,7 +257,7 @@ def create_app(
         try:
             response = await cache.client.post(
                 "/internal/commands",
-                json=command.model_dump(mode="json"),
+                json=command.model_dump(mode="json", exclude_none=True),
                 headers={LAMPORT_HEADER: str(send_ts)},
                 timeout=max(storage_timeout, 10.0),
             )

@@ -106,6 +106,7 @@ def test_http_contract_and_circulation(tmp_path):
         assert response.status_code == 200 and response.json()["ok"]
         assert response.json()["request_id"] == command["request_id"]
         assert app.state.catalog.version().revision == 2
-        assert client.post("/internal/commands", json={**command, "operation": "add_book"}).status_code == 501
+        add_res = client.post("/internal/commands", json={"request_id": "request-add-dup", "operation": "add_book", "actor_id": "staff-1", "book_id": "book-001"})
+        assert add_res.status_code == 200 and not add_res.json()["ok"] and add_res.json()["error"] == "book_already_exists"
         assert client.post("/internal/commands", json={**command, "expected_version": -1}).status_code == 422
         assert client.post("/internal/commands", json={**command, "unexpected": "field"}).status_code == 422
